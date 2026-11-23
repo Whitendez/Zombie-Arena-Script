@@ -1,4 +1,4 @@
--- ZOMBIE ARENA ALL-IN-ONE V5 | Pumpkin Cannon integrated
+-- ZOMBIE ARENA ALL-IN-ONE V6 | Pumpkin + Pirate Projectile Dodge
 -- Original V4 behavior retained; shared sky/boss/rock/pumpkin dodge.
 for _, name in ipairs({"ZombieAllInOneStop","ZombieBossDodgeStop","PumpkinDodgeStop"}) do
     if type(_G[name]) == "function" then pcall(_G[name]) end
@@ -19,15 +19,17 @@ local bossRemotes = remotes:WaitForChild("BossRemotes")
 
 local running = true
 local killOn, skyOn, buyOn, equipOn = true, true, true, true
-local bossDodgeOn, rockDodgeOn, pumpkinDodgeOn = true, true, true
+local bossDodgeOn, rockDodgeOn, pumpkinDodgeOn, pirateDodgeOn = true, true, true, true
 local SKY_HEIGHT, ATTACK_INTERVAL, MAX_HITS, BUY_INTERVAL = 30, 0.15, 20, 2
 local ROCK_RADIUS, ROCK_DODGE_DISTANCE, ROCK_EXTRA_TIME = 9, 28, 0.6
 local PUMPKIN_RADIUS, PUMPKIN_DISTANCE, PUMPKIN_EXTRA_TIME = 14, 28, 1.1
+local PIRATE_RADIUS, PIRATE_DISTANCE, PIRATE_EXTRA_TIME = 10, 28, 0.9
 local connections = {}
 local platform, dodgePlatform, home, dodgeTarget
 local dodgeUntil, dodgeReason = 0, "None"
 local healthUnlocked, lastUpgrade = false, "Waiting..."
 local rocksDodged, bossesDodged, pumpkinsDodged, pumpkinsDetected = 0, 0, 0, 0
+local piratesDodged, piratesDetected = 0, 0
 local threats = {}
 
 local function normalize(s) return tostring(s):upper():gsub("[^%w]", "") end
@@ -227,39 +229,50 @@ table.insert(connections,rockRemote.OnClientEvent:Connect(function(...)
     for i=1,args.n do handleRockPacket(args[i]) end
 end))
 
--- NEW V5: PumpkinGuard cannonball packets from ZombieShoot.
--- {ZombieId,StartX,StartY,StartZ,TargetX,TargetY,TargetZ,TravelTime,
---  ProjectileType,UnknownParameter,ZombieType}
-local function handlePumpkinPacket(packet)
-    if not running or not pumpkinDodgeOn or not skyOn or type(packet)~="table" then return end
+-- Shared ZombieShoot handler: PumpkinGuard and PirateGunner.
+-- Packet: {ZombieId,StartX,StartY,StartZ,TargetX,TargetY,TargetZ,
+--          TravelTime,ProjectileType,ExtraParameter,ZombieType}
+local function handleShotPacket(packet)
+    if not running or not skyOn or type(packet)~="table" then return end
     if type(packet[1])=="table" then
-        for _,entry in pairs(packet) do handlePumpkinPacket(entry) end
+        for _,entry in pairs(packet) do handleShotPacket(entry) end
         return
     end
     local projectile=tostring(packet[9] or "")
     local enemy=tostring(packet[11] or "")
-    if projectile~="PumpkinCannonball" and enemy~="PumpkinGuard" then return end
+    local isPumpkin=projectile=="PumpkinCannonball" or enemy=="PumpkinGuard"
+    local isPirate=projectile=="PirateProjectile" or enemy=="PirateGunner"
+    if not isPumpkin and not isPirate then return end
+    if isPumpkin and not pumpkinDodgeOn then return end
+    if isPirate and not pirateDodgeOn then return end
+
     local tx,ty,tz=tonumber(packet[5]),tonumber(packet[6]),tonumber(packet[7])
-    local flight=tonumber(packet[8]) or 1.5
-    if not (tx and ty and tz) then return end
-    pumpkinsDetected+=1
+    local flight=tonumber(packet[8])
+    if not (tx and ty and tz and flight) then return end
+    if isPumpkin then pumpkinsDetected+=1 else piratesDetected+=1 end
+
     local root=getRoot()
     if not root or not home or not platform then return end
     local impact=Vector3.new(tx,ty,tz)
     local current=dodgeTarget or root.Position
+    local radius=isPumpkin and PUMPKIN_RADIUS or PIRATE_RADIUS
     local distance=flat(current-impact).Magnitude
-    if distance>PUMPKIN_RADIUS or math.abs(current.Y-impact.Y)>12 then return end
-    local duration=math.clamp(flight+PUMPKIN_EXTRA_TIME,1,8)
-    registerThreat(impact,duration,PUMPKIN_RADIUS)
-    local destination=safeCandidate(current,PUMPKIN_DISTANCE)
+    if distance>radius or math.abs(current.Y-impact.Y)>12 then return end
+
+    -- Pirate projectiles have been observed reaching the player in ~0.4s.
+    -- React on receipt, and hold beyond impact to avoid early return.
+    local extra=isPumpkin and PUMPKIN_EXTRA_TIME or PIRATE_EXTRA_TIME
+    local duration=math.clamp(flight+extra,0.8,8)
+    registerThreat(impact,duration,radius)
+    local destination=safeCandidate(current,isPumpkin and PUMPKIN_DISTANCE or PIRATE_DISTANCE)
     if not destination then return end
-    pumpkinsDodged+=1
-    startDodge(destination,duration,"PUMPKIN | "..tostring(packet[1] or "?"))
+    if isPumpkin then pumpkinsDodged+=1 else piratesDodged+=1 end
+    startDodge(destination,duration,(isPumpkin and "PUMPKIN" or "PIRATE").." | "..tostring(packet[1] or "?"))
 end
-local pumpkinRemote=zombieRemotes:WaitForChild("ZombieShoot")
-table.insert(connections,pumpkinRemote.OnClientEvent:Connect(function(...)
+local shootRemote=zombieRemotes:WaitForChild("ZombieShoot")
+table.insert(connections,shootRemote.OnClientEvent:Connect(function(...)
     local args=table.pack(...)
-    for i=1,args.n do handlePumpkinPacket(args[i]) end
+    for i=1,args.n do handleShotPacket(args[i]) end
 end))
 
 local function handleBossAbility(data)
@@ -309,7 +322,7 @@ gui.ResetOnSpawn=false
 gui.DisplayOrder=150
 gui.Parent=playerGui
 local frame=Instance.new("Frame")
-frame.Size=UDim2.fromOffset(290,530)
+frame.Size=UDim2.fromOffset(290,570)
 frame.Position=UDim2.new(0.5,-145,0.12,0)
 frame.BackgroundColor3=Color3.fromRGB(25,25,30)
 frame.Active=true
@@ -319,7 +332,7 @@ Instance.new("UICorner",frame).CornerRadius=UDim.new(0,10)
 local title=Instance.new("TextLabel")
 title.Size=UDim2.new(1,0,0,30)
 title.BackgroundTransparency=1
-title.Text="ZOMBIE ARENA | ALL IN ONE V5"
+title.Text="ZOMBIE ARENA | ALL IN ONE V6"
 title.TextColor3=Color3.new(1,1,1)
 title.Font=Enum.Font.GothamBold
 title.TextSize=14
@@ -376,26 +389,30 @@ makeButton(275,"PUMPKIN CANNON DODGE",function()return pumpkinDodgeOn end,functi
     pumpkinDodgeOn=v
     if not v and dodgeReason:find("PUMPKIN",1,true) then returnHome() end
 end)
+makeButton(315,"PIRATE PROJECTILE DODGE",function()return pirateDodgeOn end,function(v)
+    pirateDodgeOn=v
+    if not v and dodgeReason:find("PIRATE",1,true) then returnHome() end
+end)
 local heightLabel=Instance.new("TextLabel")
 heightLabel.Size=UDim2.fromOffset(270,24)
-heightLabel.Position=UDim2.fromOffset(10,319)
+heightLabel.Position=UDim2.fromOffset(10,359)
 heightLabel.BackgroundTransparency=1
 heightLabel.TextColor3=Color3.new(1,1,1)
 heightLabel.Text="Sky Height: 30 studs"
 heightLabel.Parent=frame
-makeAction("-5",10,347,130,function()
+makeAction("-5",10,387,130,function()
     SKY_HEIGHT=math.max(5,SKY_HEIGHT-5)
     heightLabel.Text="Sky Height: "..SKY_HEIGHT.." studs"
     updateHeight()
 end)
-makeAction("+5",150,347,130,function()
+makeAction("+5",150,387,130,function()
     SKY_HEIGHT=math.min(150,SKY_HEIGHT+5)
     heightLabel.Text="Sky Height: "..SKY_HEIGHT.." studs"
     updateHeight()
 end)
 local status=Instance.new("TextLabel")
 status.Size=UDim2.fromOffset(270,94)
-status.Position=UDim2.fromOffset(10,385)
+status.Position=UDim2.fromOffset(10,425)
 status.BackgroundTransparency=1
 status.TextColor3=Color3.new(1,1,1)
 status.TextSize=12
@@ -406,7 +423,7 @@ local function stop()
     if not running then return end
     running=false
     killOn,skyOn,buyOn,equipOn=false,false,false,false
-    bossDodgeOn,rockDodgeOn,pumpkinDodgeOn=false,false,false
+    bossDodgeOn,rockDodgeOn,pumpkinDodgeOn,pirateDodgeOn=false,false,false,false
     for _,connection in ipairs(connections) do
         pcall(function()connection:Disconnect() end)
     end
@@ -414,11 +431,11 @@ local function stop()
     if gui then gui:Destroy() end
     _G.ZombieAllInOneStop=nil
     _G.ZombieBossDodgeStop=nil
-    print("Zombie Arena V5 stopped.")
+    print("Zombie Arena V6 stopped.")
 end
 _G.ZombieAllInOneStop=stop
 _G.ZombieBossDodgeStop=stop
-makeAction("REMOVE SCRIPT",10,487,270,stop)
+makeAction("REMOVE SCRIPT",10,527,270,stop)
 
 table.insert(connections,RunService.Heartbeat:Connect(function()
     if not running or not skyOn or not platform then return end
@@ -516,6 +533,7 @@ task.spawn(function()
             status.Text="Zombies: "..#zombieFolder:GetChildren().." | Next: "..lastUpgrade
                 .."\nRock: "..rocksDodged.." | Boss: "..bossesDodged
                 .." | Pumpkin: "..pumpkinsDodged.."/"..pumpkinsDetected
+                .." | Pirate: "..piratesDodged.."/"..piratesDetected
                 .."\nDodge: "..dodgeReason.." | Hold: "..string.format("%.1f",remaining)
                 .."s\nAuto-Skip: OFF"
         end
@@ -526,4 +544,5 @@ task.delay(1,function()
     if skyOn then makePlatform() end
     if equipOn then equipBest() end
 end)
-print("ZOMBIE ARENA ALL-IN-ONE V5 | Pumpkin Cannon Dodge: ON | Auto-Skip: OFF")
+print("ZOMBIE ARENA ALL-IN-ONE V6 | Pumpkin + Pirate Dodge: ON | Auto-Skip: OFF")
+
