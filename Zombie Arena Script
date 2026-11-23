@@ -1,0 +1,977 @@
+-- ZOMBIE ARENA ALL-IN-ONE V4
+-- Original V2 Kill Aura / Auto Buy / Auto Equip
+-- Sky Platform + Boss Dodge + Rock Dodge
+-- Temporary platforms + Adjustable GUI
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- STOP OLDER SCRIPTS
+for _, name in ipairs({
+    "ZombieAllInOneStop",
+    "ZombieCombinedStop",
+    "ZombieAutoUpgradesStop",
+    "AutoBuyP90Stop",
+    "AutoBuyWeaponsStop",
+    "AutoEquipWeaponsStop",
+    "AutoHealthStop",
+    "ZombieBossDodgeStop",
+    "RockScanStop",
+    "ZombieRangeScanStop"
+}) do
+    if type(_G[name]) == "function" then
+        pcall(_G[name])
+    end
+end
+
+local running = true
+
+local killOn = true
+local skyOn = true
+local buyOn = true
+local equipOn = true
+local bossDodgeOn = true
+local rockDodgeOn = true
+
+local SKY_HEIGHT = 30
+local ATTACK_INTERVAL = 0.15
+local MAX_HITS = 20
+local BUY_INTERVAL = 2
+
+local ROCK_RADIUS = 9
+local ROCK_DODGE_DISTANCE = 28
+local ROCK_EXTRA_TIME = 0.6
+
+local connections = {}
+local platform
+local dodgePlatform
+local home
+local dodgeTarget
+local dodgeUntil = 0
+local dodgeReason = "None"
+
+local healthUnlocked = false
+local lastUpgrade = "Waiting..."
+local rocksDodged = 0
+local bossesDodged = 0
+
+local remotes = RS:WaitForChild("Remotes")
+local gunHit = remotes:WaitForChild("GunRemotes")
+    :WaitForChild("GunHit")
+
+local upgrades = remotes:WaitForChild("UpgradeRemotes")
+local weaponBuy = upgrades:WaitForChild("PurchaseWeaponUpgrade")
+local healthBuy = upgrades:WaitForChild("PurchaseHealthUpgrade")
+
+local zombieFolder = workspace:WaitForChild("Zombies_Local")
+local zombieRemotes = remotes:WaitForChild("ZombieRemotes")
+local bossRemotes = remotes:WaitForChild("BossRemotes")
+
+local function normalize(s)
+    return tostring(s):upper():gsub("[^%w]", "")
+end
+
+local function getRoot()
+    local char = player.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function flat(v)
+    return Vector3.new(v.X, 0, v.Z)
+end
+
+local function direction(v)
+    local f = flat(v)
+    if f.Magnitude < 0.01 then
+        return Vector3.new(1, 0, 0)
+    end
+    return f.Unit
+end
+
+local function getVector(v)
+    if typeof(v) == "Vector3" then
+        return v
+    end
+
+    if type(v) == "table" then
+        local x = v.X or v.x or v[1]
+        local y = v.Y or v.y or v[2]
+        local z = v.Z or v.z or v[3]
+
+        if type(x) == "number"
+            and type(y) == "number"
+            and type(z) == "number" then
+            return Vector3.new(x, y, z)
+        end
+    end
+end
+
+-- =========================================
+-- ORIGINAL WEAPON DETECTION
+-- =========================================
+
+local function getBestWeapon()
+    local character = player.Character
+    local backpack = player:FindFirstChild("Backpack")
+    local tools = {}
+
+    for _, container in ipairs({character, backpack}) do
+        if container then
+            for _, item in ipairs(container:GetChildren()) do
+                if item:IsA("Tool") then
+                    table.insert(tools, item)
+                end
+            end
+        end
+    end
+
+    local function find(name)
+        local wanted = normalize(name)
+
+        for _, tool in ipairs(tools) do
+            if normalize(tool.Name) == wanted then
+                return tool
+            end
+        end
+    end
+
+    return find("SCAR-H")
+        or find("P90")
+        or find("Pistol")
+        or find("ShotGun")
+        or find("Rifle")
+        or find("Minigun")
+        or tools[1]
+end
+
+local function equipBest()
+    if not equipOn then return end
+
+    local character = player.Character
+    local humanoid = character
+        and character:FindFirstChildOfClass("Humanoid")
+
+    if not humanoid then return end
+
+    local target = getBestWeapon()
+
+    if target and target.Parent ~= character then
+        pcall(function()
+            humanoid:EquipTool(target)
+        end)
+    end
+end
+
+local function currentWeapon()
+    local character = player.Character
+
+    if character then
+        for _, item in ipairs(character:GetChildren()) do
+            if item:IsA("Tool") then
+                return item.Name
+            end
+        end
+    end
+
+    local best = getBestWeapon()
+    return best and best.Name or "Pistol"
+end
+
+local function getNextUpgrade()
+    local main = playerGui:FindFirstChild("MainGui")
+    local panel = main and main:FindFirstChild("ControlPanel2")
+    local nextUp = panel and panel:FindFirstChild("NextUpgrade")
+    local label = nextUp
+        and nextUp:FindFirstChild("DescriptionLabel")
+
+    return label and label.Text or ""
+end
+
+-- =========================================
+-- SKY PLATFORM
+-- =========================================
+
+local function standingY()
+    return home and (home.Y + SKY_HEIGHT)
+end
+
+local function platformY()
+    return standingY() - 3.5
+end
+
+local function createPlatform(name, x, z)
+    local p = Instance.new("Part")
+    p.Name = name
+    p.Size = Vector3.new(18, 1, 18)
+    p.Anchored = true
+    p.CanCollide = true
+    p.CanTouch = false
+    p.Transparency = 1
+    p.Position = Vector3.new(x, platformY(), z)
+    p.Parent = workspace
+    return p
+end
+
+local function removeDodgePlatform()
+    if dodgePlatform then
+        dodgePlatform:Destroy()
+        dodgePlatform = nil
+    end
+end
+
+local function removePlatform()
+    if platform then
+        platform:Destroy()
+        platform = nil
+    end
+
+    removeDodgePlatform()
+    dodgeTarget = nil
+    dodgeUntil = 0
+    dodgeReason = "None"
+end
+
+local function teleportTo(x, z)
+    local root = getRoot()
+    if root and home then
+        root.CFrame = CFrame.new(
+            x,
+            standingY(),
+            z
+        )
+    end
+end
+
+local function makePlatform()
+    removePlatform()
+
+    local root = getRoot()
+    if not root then return end
+
+    home = root.Position
+
+    platform = createPlatform(
+        "ZombieSkyPlatform",
+        home.X,
+        home.Z
+    )
+
+    teleportTo(home.X, home.Z)
+end
+
+local function returnHome()
+    if home and skyOn then
+        teleportTo(home.X, home.Z)
+    end
+
+    dodgeTarget = nil
+    dodgeUntil = 0
+    dodgeReason = "None"
+
+    removeDodgePlatform()
+end
+
+local function updateHeight()
+    if not home then return end
+
+    if platform then
+        platform.Position = Vector3.new(
+            home.X, platformY(), home.Z
+        )
+    end
+
+    if dodgePlatform and dodgeTarget then
+        dodgePlatform.Position = Vector3.new(
+            dodgeTarget.X,
+            platformY(),
+            dodgeTarget.Z
+        )
+    end
+
+    if skyOn then
+        local target = dodgeTarget or home
+        teleportTo(target.X, target.Z)
+    end
+end
+
+-- =========================================
+-- SHARED DODGE SYSTEM
+-- =========================================
+
+local function startDodge(target, duration, reason)
+    if not running or not skyOn then return end
+    if not home or not platform then return end
+
+    local endTime = os.clock() + duration
+
+    -- Extend dodge duration when attacks overlap.
+    dodgeUntil = math.max(dodgeUntil, endTime)
+
+    dodgeTarget = Vector3.new(
+        target.X,
+        standingY(),
+        target.Z
+    )
+
+    dodgeReason = reason
+
+    removeDodgePlatform()
+
+    dodgePlatform = createPlatform(
+        "ZombieTemporaryDodgePlatform",
+        dodgeTarget.X,
+        dodgeTarget.Z
+    )
+
+    teleportTo(dodgeTarget.X, dodgeTarget.Z)
+
+    print(
+        "[AUTO DODGE]",
+        reason,
+        "Hold:",
+        math.max(0, dodgeUntil - os.clock())
+    )
+end
+
+-- =========================================
+-- ROCK AUTO DODGE
+-- Packet:
+-- {ZombieId, StartX, StartY, StartZ,
+--  TargetX, TargetY, TargetZ, TravelTime}
+-- =========================================
+
+local function handleRockPacket(packet)
+    if not running or not rockDodgeOn or not skyOn then
+        return
+    end
+
+    if type(packet) ~= "table" then return end
+
+    -- Handle nested event packets
+    if type(packet[1]) == "table" then
+        for _, entry in pairs(packet) do
+            handleRockPacket(entry)
+        end
+        return
+    end
+
+    local id = tonumber(packet[1])
+
+    local sx = tonumber(packet[2])
+    local sy = tonumber(packet[3])
+    local sz = tonumber(packet[4])
+
+    local tx = tonumber(packet[5])
+    local ty = tonumber(packet[6])
+    local tz = tonumber(packet[7])
+
+    local flight = tonumber(packet[8])
+
+    if not (sx and sy and sz and tx and ty and tz) then
+        return
+    end
+
+    local root = getRoot()
+    if not root or not home or not platform then
+        return
+    end
+
+    local startPos = Vector3.new(sx, sy, sz)
+    local targetPos = Vector3.new(tx, ty, tz)
+
+    -- Use actual current dodge position if already dodging.
+    local currentPos = dodgeTarget or root.Position
+
+    local horizontalDistance =
+        flat(currentPos - targetPos).Magnitude
+
+    local verticalDistance =
+        math.abs(currentPos.Y - targetPos.Y)
+
+    -- Check whether the rock is aimed near us.
+    if horizontalDistance > ROCK_RADIUS
+        or verticalDistance > 12 then
+        return
+    end
+
+    -- Move perpendicular to incoming projectile.
+    local incoming = direction(targetPos - startPos)
+
+    local right = Vector3.new(
+        -incoming.Z,
+        0,
+        incoming.X
+    )
+
+    local side = flat(currentPos - startPos):Dot(right)
+
+    local dodgeDir = right * (side >= 0 and 1 or -1)
+
+    -- Move farther than the expected impact area.
+    local target = currentPos
+        + dodgeDir * ROCK_DODGE_DISTANCE
+
+    -- If already dodging, do not shorten the hold.
+    local duration = math.clamp(
+        (flight or 1.5) + ROCK_EXTRA_TIME,
+        0.8,
+        8
+    )
+
+    rocksDodged += 1
+
+    startDodge(
+        target,
+        duration,
+        "ROCK | Zombie " .. tostring(id or "?")
+    )
+end
+
+local rockRemote =
+    zombieRemotes:WaitForChild("ZombieRockThrow")
+
+table.insert(connections,
+    rockRemote.OnClientEvent:Connect(function(...)
+        local args = table.pack(...)
+
+        for i = 1, args.n do
+            handleRockPacket(args[i])
+        end
+    end)
+)
+
+-- =========================================
+-- BOSS AUTO DODGE
+-- =========================================
+
+local function handleBossAbility(data)
+    if not running or not bossDodgeOn or not skyOn then
+        return
+    end
+
+    if type(data) ~= "table" then return end
+    if data.Phase ~= "Telegraph" then return end
+
+    local cast = data.Cast
+    if type(cast) ~= "table" then return end
+
+    local root = getRoot()
+    if not root or not home then return end
+
+    local origin = getVector(cast.Origin)
+    if not origin then return end
+
+    local ability = tostring(
+        data.AbilityId or "Unknown"
+    )
+
+    local radius = tonumber(cast.Radius)
+        or tonumber(cast.MaximumRadius)
+
+    if not radius then
+        warn("[BOSS DODGE] Unknown shape:", ability)
+        return
+    end
+
+    local playerPos = dodgeTarget or root.Position
+    local distance =
+        flat(playerPos - origin).Magnitude
+
+    if distance > radius + 4 then
+        return
+    end
+
+    local dodgeDir = direction(playerPos - origin)
+
+    if ability == "BoxerBarrage" then
+        local facing = getVector(cast.FacingPosition)
+
+        if facing then
+            local forward = direction(facing - origin)
+            local right = Vector3.new(
+                -forward.Z,
+                0,
+                forward.X
+            )
+
+            local side =
+                flat(playerPos - origin):Dot(right)
+
+            dodgeDir = right
+                * (side >= 0 and 1 or -1)
+        end
+    end
+
+    local travel = math.max(
+        12,
+        radius + 8 - distance
+    )
+
+    local target = playerPos + dodgeDir * travel
+
+    local duration = 2
+
+    if type(cast.RecoveryEndAt) == "number"
+        and type(data.ServerTime) == "number" then
+
+        duration = math.max(
+            0.5,
+            cast.RecoveryEndAt
+                - data.ServerTime
+                + 0.25
+        )
+    end
+
+    bossesDodged += 1
+
+    startDodge(
+        target,
+        duration,
+        "BOSS | " .. ability
+    )
+end
+
+local bossRemote =
+    bossRemotes:WaitForChild("BossAbilityState")
+
+table.insert(connections,
+    bossRemote.OnClientEvent:Connect(handleBossAbility)
+)
+
+-- =========================================
+-- GUI
+-- =========================================
+
+local old = playerGui:FindFirstChild("ZombieAllInOneGUI")
+if old then old:Destroy() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "ZombieAllInOneGUI"
+gui.ResetOnSpawn = false
+gui.DisplayOrder = 150
+gui.Parent = playerGui
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.fromOffset(290, 485)
+frame.Position = UDim2.new(0.5, -145, 0.15, 0)
+frame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+frame.Active = true
+frame.Draggable = true
+frame.Parent = gui
+
+Instance.new("UICorner", frame).CornerRadius =
+    UDim.new(0, 10)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 30)
+title.BackgroundTransparency = 1
+title.Text = "ZOMBIE ARENA | ALL IN ONE V4"
+title.TextColor3 = Color3.new(1, 1, 1)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 14
+title.Parent = frame
+
+local function makeButton(y, label, getter, setter)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(1, -20, 0, 35)
+    button.Position = UDim2.fromOffset(10, y)
+    button.TextColor3 = Color3.new(1, 1, 1)
+    button.Font = Enum.Font.GothamBold
+    button.TextSize = 13
+    button.Parent = frame
+
+    Instance.new("UICorner", button).CornerRadius =
+        UDim.new(0, 7)
+
+    local function refresh()
+        local state = getter()
+
+        button.Text =
+            label .. ": " .. (state and "ON" or "OFF")
+
+        button.BackgroundColor3 = state
+            and Color3.fromRGB(35, 145, 75)
+            or Color3.fromRGB(150, 45, 45)
+    end
+
+    table.insert(connections,
+        button.MouseButton1Click:Connect(function()
+            setter(not getter())
+            refresh()
+        end)
+    )
+
+    refresh()
+end
+
+local function makeAction(text, x, y, w, callback)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.fromOffset(w, 32)
+    b.Position = UDim2.fromOffset(x, y)
+    b.BackgroundColor3 = Color3.fromRGB(55, 65, 85)
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 13
+    b.Text = text
+    b.Parent = frame
+
+    Instance.new("UICorner", b).CornerRadius =
+        UDim.new(0, 7)
+
+    table.insert(connections,
+        b.MouseButton1Click:Connect(callback)
+    )
+
+    return b
+end
+
+makeButton(35, "KILL AURA",
+    function() return killOn end,
+    function(v) killOn = v end)
+
+makeButton(75, "SKY TP",
+    function() return skyOn end,
+    function(v)
+        skyOn = v
+
+        if v then
+            makePlatform()
+        else
+            removePlatform()
+        end
+    end)
+
+makeButton(115, "AUTO BUY",
+    function() return buyOn end,
+    function(v) buyOn = v end)
+
+makeButton(155, "AUTO EQUIP",
+    function() return equipOn end,
+    function(v) equipOn = v end)
+
+makeButton(195, "BOSS AUTO DODGE",
+    function() return bossDodgeOn end,
+    function(v)
+        bossDodgeOn = v
+        if not v and dodgeReason:find("BOSS", 1, true) then
+            returnHome()
+        end
+    end)
+
+makeButton(235, "ROCK AUTO DODGE",
+    function() return rockDodgeOn end,
+    function(v)
+        rockDodgeOn = v
+        if not v and dodgeReason:find("ROCK", 1, true) then
+            returnHome()
+        end
+    end)
+
+local heightLabel = Instance.new("TextLabel")
+heightLabel.Size = UDim2.fromOffset(270, 24)
+heightLabel.Position = UDim2.fromOffset(10, 279)
+heightLabel.BackgroundTransparency = 1
+heightLabel.TextColor3 = Color3.new(1, 1, 1)
+heightLabel.Text = "Sky Height: 30 studs"
+heightLabel.Parent = frame
+
+makeAction("-5", 10, 307, 130, function()
+    SKY_HEIGHT = math.max(5, SKY_HEIGHT - 5)
+    heightLabel.Text =
+        "Sky Height: " .. SKY_HEIGHT .. " studs"
+    updateHeight()
+end)
+
+makeAction("+5", 150, 307, 130, function()
+    SKY_HEIGHT = math.min(150, SKY_HEIGHT + 5)
+    heightLabel.Text =
+        "Sky Height: " .. SKY_HEIGHT .. " studs"
+    updateHeight()
+end)
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.fromOffset(270, 94)
+status.Position = UDim2.fromOffset(10, 345)
+status.BackgroundTransparency = 1
+status.TextColor3 = Color3.new(1, 1, 1)
+status.TextSize = 12
+status.TextWrapped = true
+status.Text = "Starting..."
+status.Parent = frame
+
+-- =========================================
+-- STOP FUNCTION
+-- =========================================
+
+local function stop()
+    if not running then return end
+    running = false
+
+    killOn = false
+    skyOn = false
+    buyOn = false
+    equipOn = false
+    bossDodgeOn = false
+    rockDodgeOn = false
+
+    for _, connection in ipairs(connections) do
+        pcall(function()
+            connection:Disconnect()
+        end)
+    end
+
+    removePlatform()
+
+    if gui then
+        gui:Destroy()
+    end
+
+    _G.ZombieAllInOneStop = nil
+    _G.ZombieBossDodgeStop = nil
+
+    print("Zombie Arena V4 stopped.")
+end
+
+_G.ZombieAllInOneStop = stop
+_G.ZombieBossDodgeStop = stop
+
+makeAction("REMOVE SCRIPT", 10, 447, 270, stop)
+
+-- =========================================
+-- PLATFORM FOLLOW + DODGE TIMER
+-- =========================================
+
+table.insert(connections,
+    RunService.Heartbeat:Connect(function()
+        if not running or not skyOn or not platform then
+            return
+        end
+
+        local root = getRoot()
+        if not root then return end
+
+        if dodgeTarget then
+            if os.clock() >= dodgeUntil then
+                returnHome()
+            else
+                local desired = Vector3.new(
+                    dodgeTarget.X,
+                    standingY(),
+                    dodgeTarget.Z
+                )
+
+                if (root.Position - desired).Magnitude > 1 then
+                    root.CFrame = CFrame.new(desired)
+                end
+
+                if dodgePlatform then
+                    dodgePlatform.Position = Vector3.new(
+                        dodgeTarget.X,
+                        platformY(),
+                        dodgeTarget.Z
+                    )
+                end
+            end
+        else
+            -- Original V2 platform follow
+            platform.Position = Vector3.new(
+                root.Position.X,
+                platform.Position.Y,
+                root.Position.Z
+            )
+        end
+    end)
+)
+
+-- =========================================
+-- RESPAWN
+-- =========================================
+
+table.insert(connections,
+    player.CharacterAdded:Connect(function()
+        task.wait(1)
+
+        if not running then return end
+
+        if skyOn then
+            makePlatform()
+        end
+
+        if equipOn then
+            equipBest()
+        end
+    end)
+)
+
+-- =========================================
+-- ORIGINAL V2 AUTO EQUIP
+-- =========================================
+
+task.spawn(function()
+    while running do
+        if equipOn then
+            equipBest()
+        end
+        task.wait(0.5)
+    end
+end)
+
+-- =========================================
+-- ORIGINAL V2 KILL AURA
+-- =========================================
+
+task.spawn(function()
+    local cursor = 1
+
+    while running do
+        task.wait(ATTACK_INTERVAL)
+
+        if not killOn then continue end
+
+        local zombies = {}
+
+        for _, model in ipairs(zombieFolder:GetChildren()) do
+            local root =
+                model:FindFirstChild("HumanoidRootPart")
+
+            if root then
+                local id = tonumber(
+                    model.Name:match("(%d+)$")
+                )
+
+                if id then
+                    table.insert(zombies, {
+                        id = id,
+                        root = root
+                    })
+                end
+            end
+        end
+
+        if #zombies == 0 then
+            cursor = 1
+            continue
+        end
+
+        local weapon = currentWeapon()
+        local hits = math.min(MAX_HITS, #zombies)
+
+        for i = 1, hits do
+            if not running or not killOn then
+                break
+            end
+
+            if cursor > #zombies then
+                cursor = 1
+            end
+
+            local zombie = zombies[cursor]
+            cursor += 1
+
+            if zombie.root.Parent then
+                pcall(function()
+                    gunHit:FireServer(
+                        weapon,
+                        zombie.id,
+                        zombie.root.Position
+                    )
+                end)
+            end
+        end
+    end
+end)
+
+-- =========================================
+-- ORIGINAL V2 AUTO BUY
+-- P90 -> SCAR-H -> HEALTH
+-- =========================================
+
+task.spawn(function()
+    while running do
+        task.wait(BUY_INTERVAL)
+
+        if not buyOn then continue end
+
+        local nextUpgrade = getNextUpgrade()
+        local normalized = normalize(nextUpgrade)
+
+        if normalized:find("P90", 1, true)
+            or normalized:find("SCARH", 1, true) then
+
+            lastUpgrade = nextUpgrade
+
+            pcall(function()
+                weaponBuy:FireServer()
+            end)
+
+        elseif nextUpgrade ~= "" then
+            healthUnlocked = true
+        end
+
+        if healthUnlocked then
+            lastUpgrade = "Health upgrades"
+
+            pcall(function()
+                healthBuy:FireServer()
+            end)
+        end
+    end
+end)
+
+-- =========================================
+-- GUI STATUS
+-- =========================================
+
+task.spawn(function()
+    while running do
+        task.wait(0.5)
+
+        if status.Parent then
+            local remaining = math.max(
+                0,
+                dodgeUntil - os.clock()
+            )
+
+            status.Text =
+                "Zombies: " .. #zombieFolder:GetChildren()
+                .. " | Next: " .. lastUpgrade
+                .. "\nRock Dodges: " .. rocksDodged
+                .. " | Boss Dodges: " .. bossesDodged
+                .. "\nDodge: " .. dodgeReason
+                .. " | Hold: " .. string.format("%.1f", remaining)
+                .. "s\nAuto-Skip: OFF"
+        end
+    end
+end)
+
+-- =========================================
+-- INITIAL START
+-- =========================================
+
+task.delay(1, function()
+    if not running then return end
+
+    if skyOn then
+        makePlatform()
+    end
+
+    if equipOn then
+        equipBest()
+    end
+end)
+
+print("================================")
+print("ZOMBIE ARENA ALL-IN-ONE V4")
+print("Kill Aura: ON")
+print("Auto Buy: ON")
+print("Auto Equip: ON")
+print("Sky Platform: ON")
+print("Boss Auto Dodge: ON")
+print("Rock Auto Dodge: ON")
+print("Sky Height: 30")
+print("Auto-Skip: OFF")
+print("================================")
