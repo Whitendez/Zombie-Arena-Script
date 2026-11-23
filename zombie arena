@@ -1,0 +1,529 @@
+-- ZOMBIE ARENA ALL-IN-ONE V5 | Pumpkin Cannon integrated
+-- Original V4 behavior retained; shared sky/boss/rock/pumpkin dodge.
+for _, name in ipairs({"ZombieAllInOneStop","ZombieBossDodgeStop","PumpkinDodgeStop"}) do
+    if type(_G[name]) == "function" then pcall(_G[name]) end
+end
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local remotes = RS:WaitForChild("Remotes")
+local gunHit = remotes:WaitForChild("GunRemotes"):WaitForChild("GunHit")
+local upgrades = remotes:WaitForChild("UpgradeRemotes")
+local weaponBuy = upgrades:WaitForChild("PurchaseWeaponUpgrade")
+local healthBuy = upgrades:WaitForChild("PurchaseHealthUpgrade")
+local zombieFolder = workspace:WaitForChild("Zombies_Local")
+local zombieRemotes = remotes:WaitForChild("ZombieRemotes")
+local bossRemotes = remotes:WaitForChild("BossRemotes")
+
+local running = true
+local killOn, skyOn, buyOn, equipOn = true, true, true, true
+local bossDodgeOn, rockDodgeOn, pumpkinDodgeOn = true, true, true
+local SKY_HEIGHT, ATTACK_INTERVAL, MAX_HITS, BUY_INTERVAL = 30, 0.15, 20, 2
+local ROCK_RADIUS, ROCK_DODGE_DISTANCE, ROCK_EXTRA_TIME = 9, 28, 0.6
+local PUMPKIN_RADIUS, PUMPKIN_DISTANCE, PUMPKIN_EXTRA_TIME = 14, 28, 1.1
+local connections = {}
+local platform, dodgePlatform, home, dodgeTarget
+local dodgeUntil, dodgeReason = 0, "None"
+local healthUnlocked, lastUpgrade = false, "Waiting..."
+local rocksDodged, bossesDodged, pumpkinsDodged, pumpkinsDetected = 0, 0, 0, 0
+local threats = {}
+
+local function normalize(s) return tostring(s):upper():gsub("[^%w]", "") end
+local function getRoot()
+    local char = player.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+local function flat(v) return Vector3.new(v.X, 0, v.Z) end
+local function direction(v)
+    local f = flat(v)
+    return f.Magnitude < 0.01 and Vector3.new(1,0,0) or f.Unit
+end
+local function getVector(v)
+    if typeof(v) == "Vector3" then return v end
+    if type(v) == "table" then
+        local x,y,z = v.X or v.x or v[1], v.Y or v.y or v[2], v.Z or v.z or v[3]
+        if type(x)=="number" and type(y)=="number" and type(z)=="number" then
+            return Vector3.new(x,y,z)
+        end
+    end
+end
+local function getBestWeapon()
+    local tools = {}
+    for _, container in ipairs({player.Character, player:FindFirstChild("Backpack")}) do
+        if container then
+            for _, item in ipairs(container:GetChildren()) do
+                if item:IsA("Tool") then table.insert(tools,item) end
+            end
+        end
+    end
+    local function find(name)
+        for _,tool in ipairs(tools) do
+            if normalize(tool.Name)==normalize(name) then return tool end
+        end
+    end
+    return find("SCAR-H") or find("P90") or find("Pistol") or find("ShotGun")
+        or find("Rifle") or find("Minigun") or tools[1]
+end
+local function equipBest()
+    if not equipOn then return end
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local tool = getBestWeapon()
+    if hum and tool and tool.Parent ~= char then
+        pcall(function() hum:EquipTool(tool) end)
+    end
+end
+local function currentWeapon()
+    local char = player.Character
+    if char then
+        for _,item in ipairs(char:GetChildren()) do
+            if item:IsA("Tool") then return item.Name end
+        end
+    end
+    local best = getBestWeapon()
+    return best and best.Name or "Pistol"
+end
+local function getNextUpgrade()
+    local main = playerGui:FindFirstChild("MainGui")
+    local panel = main and main:FindFirstChild("ControlPanel2")
+    local nextUp = panel and panel:FindFirstChild("NextUpgrade")
+    local label = nextUp and nextUp:FindFirstChild("DescriptionLabel")
+    return label and label.Text or ""
+end
+
+-- Shared sky platform and dodge position (one controller for all attacks)
+local function standingY() return home and home.Y + SKY_HEIGHT end
+local function platformY() return standingY() - 3.5 end
+local function createPlatform(name,x,z)
+    local p=Instance.new("Part")
+    p.Name=name
+    p.Size=Vector3.new(18,1,18)
+    p.Anchored=true
+    p.CanCollide=true
+    p.CanTouch=false
+    p.Transparency=1
+    p.Position=Vector3.new(x,platformY(),z)
+    p.Parent=workspace
+    return p
+end
+local function removeDodgePlatform()
+    if dodgePlatform then dodgePlatform:Destroy(); dodgePlatform=nil end
+end
+local function clearDodge()
+    dodgeTarget=nil
+    dodgeUntil=0
+    dodgeReason="None"
+    removeDodgePlatform()
+    table.clear(threats)
+end
+local function removePlatform()
+    if platform then platform:Destroy(); platform=nil end
+    clearDodge()
+end
+local function teleportTo(x,z)
+    local root=getRoot()
+    if root and home then root.CFrame=CFrame.new(x,standingY(),z) end
+end
+local function makePlatform()
+    removePlatform()
+    local root=getRoot()
+    if not root then return end
+    home=root.Position
+    platform=createPlatform("ZombieSkyPlatform",home.X,home.Z)
+    teleportTo(home.X,home.Z)
+end
+local function returnHome()
+    if home and skyOn then teleportTo(home.X,home.Z) end
+    clearDodge()
+end
+local function updateHeight()
+    if not home then return end
+    if platform then platform.Position=Vector3.new(home.X,platformY(),home.Z) end
+    if dodgePlatform and dodgeTarget then
+        dodgePlatform.Position=Vector3.new(dodgeTarget.X,platformY(),dodgeTarget.Z)
+    end
+    if skyOn then
+        local target=dodgeTarget or home
+        teleportTo(target.X,target.Z)
+    end
+end
+local function cleanThreats()
+    local now=os.clock()
+    for i=#threats,1,-1 do
+        if threats[i].expires <= now then table.remove(threats,i) end
+    end
+end
+local function registerThreat(pos, duration, radius)
+    cleanThreats()
+    table.insert(threats,{pos=pos,expires=os.clock()+duration,radius=radius})
+end
+local function safeCandidate(current, distance)
+    cleanThreats()
+    local dirs={
+        Vector3.new(1,0,0),Vector3.new(-1,0,0),
+        Vector3.new(0,0,1),Vector3.new(0,0,-1),
+        Vector3.new(1,0,1).Unit,Vector3.new(-1,0,1).Unit,
+        Vector3.new(1,0,-1).Unit,Vector3.new(-1,0,-1).Unit
+    }
+    local best,score=nil,-math.huge
+    for _,dir in ipairs(dirs) do
+        local pos=current+dir*distance
+        local nearest=math.huge
+        for _,threat in ipairs(threats) do
+            nearest=math.min(nearest,flat(pos-threat.pos).Magnitude-threat.radius)
+        end
+        if nearest>score then best=pos;score=nearest end
+    end
+    return best
+end
+local function startDodge(target,duration,reason)
+    if not running or not skyOn or not home or not platform then return end
+    duration=math.clamp(duration,0.5,8)
+    dodgeUntil=math.max(dodgeUntil,os.clock()+duration)
+    dodgeTarget=Vector3.new(target.X,standingY(),target.Z)
+    dodgeReason=reason
+    removeDodgePlatform()
+    dodgePlatform=createPlatform("ZombieTemporaryDodgePlatform",dodgeTarget.X,dodgeTarget.Z)
+    teleportTo(dodgeTarget.X,dodgeTarget.Z)
+    print("[AUTO DODGE]",reason,"Hold:",math.max(0,dodgeUntil-os.clock()))
+end
+
+local function handleRockPacket(packet)
+    if not running or not rockDodgeOn or not skyOn or type(packet)~="table" then return end
+    if type(packet[1])=="table" then
+        for _,entry in pairs(packet) do handleRockPacket(entry) end
+        return
+    end
+    local id=tonumber(packet[1])
+    local sx,sy,sz=tonumber(packet[2]),tonumber(packet[3]),tonumber(packet[4])
+    local tx,ty,tz=tonumber(packet[5]),tonumber(packet[6]),tonumber(packet[7])
+    local flight=tonumber(packet[8])
+    if not (sx and sy and sz and tx and ty and tz) then return end
+    local root=getRoot()
+    if not root or not home or not platform then return end
+    local startPos=Vector3.new(sx,sy,sz)
+    local targetPos=Vector3.new(tx,ty,tz)
+    local currentPos=dodgeTarget or root.Position
+    if flat(currentPos-targetPos).Magnitude>ROCK_RADIUS
+        or math.abs(currentPos.Y-targetPos.Y)>12 then return end
+    local incoming=direction(targetPos-startPos)
+    local right=Vector3.new(-incoming.Z,0,incoming.X)
+    local side=flat(currentPos-startPos):Dot(right)
+    local dodgeDir=right*(side>=0 and 1 or -1)
+    local duration=math.clamp((flight or 1.5)+ROCK_EXTRA_TIME,0.8,8)
+    registerThreat(targetPos,duration,ROCK_RADIUS)
+    local target=currentPos+dodgeDir*ROCK_DODGE_DISTANCE
+    -- Avoid moving into any still-active cannonball/rock impact point.
+    local safe=safeCandidate(currentPos,ROCK_DODGE_DISTANCE)
+    if safe and flat(safe-targetPos).Magnitude>flat(target-targetPos).Magnitude then target=safe end
+    rocksDodged+=1
+    startDodge(target,duration,"ROCK | Zombie "..tostring(id or "?"))
+end
+local rockRemote=zombieRemotes:WaitForChild("ZombieRockThrow")
+table.insert(connections,rockRemote.OnClientEvent:Connect(function(...)
+    local args=table.pack(...)
+    for i=1,args.n do handleRockPacket(args[i]) end
+end))
+
+-- NEW V5: PumpkinGuard cannonball packets from ZombieShoot.
+-- {ZombieId,StartX,StartY,StartZ,TargetX,TargetY,TargetZ,TravelTime,
+--  ProjectileType,UnknownParameter,ZombieType}
+local function handlePumpkinPacket(packet)
+    if not running or not pumpkinDodgeOn or not skyOn or type(packet)~="table" then return end
+    if type(packet[1])=="table" then
+        for _,entry in pairs(packet) do handlePumpkinPacket(entry) end
+        return
+    end
+    local projectile=tostring(packet[9] or "")
+    local enemy=tostring(packet[11] or "")
+    if projectile~="PumpkinCannonball" and enemy~="PumpkinGuard" then return end
+    local tx,ty,tz=tonumber(packet[5]),tonumber(packet[6]),tonumber(packet[7])
+    local flight=tonumber(packet[8]) or 1.5
+    if not (tx and ty and tz) then return end
+    pumpkinsDetected+=1
+    local root=getRoot()
+    if not root or not home or not platform then return end
+    local impact=Vector3.new(tx,ty,tz)
+    local current=dodgeTarget or root.Position
+    local distance=flat(current-impact).Magnitude
+    if distance>PUMPKIN_RADIUS or math.abs(current.Y-impact.Y)>12 then return end
+    local duration=math.clamp(flight+PUMPKIN_EXTRA_TIME,1,8)
+    registerThreat(impact,duration,PUMPKIN_RADIUS)
+    local destination=safeCandidate(current,PUMPKIN_DISTANCE)
+    if not destination then return end
+    pumpkinsDodged+=1
+    startDodge(destination,duration,"PUMPKIN | "..tostring(packet[1] or "?"))
+end
+local pumpkinRemote=zombieRemotes:WaitForChild("ZombieShoot")
+table.insert(connections,pumpkinRemote.OnClientEvent:Connect(function(...)
+    local args=table.pack(...)
+    for i=1,args.n do handlePumpkinPacket(args[i]) end
+end))
+
+local function handleBossAbility(data)
+    if not running or not bossDodgeOn or not skyOn then return end
+    if type(data)~="table" or data.Phase~="Telegraph" then return end
+    local cast=data.Cast
+    if type(cast)~="table" then return end
+    local root=getRoot()
+    if not root or not home then return end
+    local origin=getVector(cast.Origin)
+    if not origin then return end
+    local ability=tostring(data.AbilityId or "Unknown")
+    local radius=tonumber(cast.Radius) or tonumber(cast.MaximumRadius)
+    if not radius then warn("[BOSS DODGE] Unknown shape:",ability);return end
+    local playerPos=dodgeTarget or root.Position
+    local distance=flat(playerPos-origin).Magnitude
+    if distance>radius+4 then return end
+    local dodgeDir=direction(playerPos-origin)
+    if ability=="BoxerBarrage" then
+        local facing=getVector(cast.FacingPosition)
+        if facing then
+            local forward=direction(facing-origin)
+            local right=Vector3.new(-forward.Z,0,forward.X)
+            local side=flat(playerPos-origin):Dot(right)
+            dodgeDir=right*(side>=0 and 1 or -1)
+        end
+    end
+    local travel=math.max(12,radius+8-distance)
+    local target=playerPos+dodgeDir*travel
+    local duration=2
+    if type(cast.RecoveryEndAt)=="number" and type(data.ServerTime)=="number" then
+        duration=math.max(0.5,cast.RecoveryEndAt-data.ServerTime+0.25)
+    end
+    registerThreat(origin,duration,radius)
+    bossesDodged+=1
+    startDodge(target,duration,"BOSS | "..ability)
+end
+local bossRemote=bossRemotes:WaitForChild("BossAbilityState")
+table.insert(connections,bossRemote.OnClientEvent:Connect(handleBossAbility))
+
+-- GUI: V4 layout expanded for seventh toggle.
+local old=playerGui:FindFirstChild("ZombieAllInOneGUI")
+if old then old:Destroy() end
+local gui=Instance.new("ScreenGui")
+gui.Name="ZombieAllInOneGUI"
+gui.ResetOnSpawn=false
+gui.DisplayOrder=150
+gui.Parent=playerGui
+local frame=Instance.new("Frame")
+frame.Size=UDim2.fromOffset(290,530)
+frame.Position=UDim2.new(0.5,-145,0.12,0)
+frame.BackgroundColor3=Color3.fromRGB(25,25,30)
+frame.Active=true
+frame.Draggable=true
+frame.Parent=gui
+Instance.new("UICorner",frame).CornerRadius=UDim.new(0,10)
+local title=Instance.new("TextLabel")
+title.Size=UDim2.new(1,0,0,30)
+title.BackgroundTransparency=1
+title.Text="ZOMBIE ARENA | ALL IN ONE V5"
+title.TextColor3=Color3.new(1,1,1)
+title.Font=Enum.Font.GothamBold
+title.TextSize=14
+title.Parent=frame
+local function makeButton(y,label,getter,setter)
+    local button=Instance.new("TextButton")
+    button.Size=UDim2.new(1,-20,0,35)
+    button.Position=UDim2.fromOffset(10,y)
+    button.TextColor3=Color3.new(1,1,1)
+    button.Font=Enum.Font.GothamBold
+    button.TextSize=13
+    button.Parent=frame
+    Instance.new("UICorner",button).CornerRadius=UDim.new(0,7)
+    local function refresh()
+        local state=getter()
+        button.Text=label..": "..(state and "ON" or "OFF")
+        button.BackgroundColor3=state and Color3.fromRGB(35,145,75) or Color3.fromRGB(150,45,45)
+    end
+    table.insert(connections,button.MouseButton1Click:Connect(function()
+        setter(not getter());refresh()
+    end))
+    refresh()
+end
+local function makeAction(text,x,y,w,callback)
+    local b=Instance.new("TextButton")
+    b.Size=UDim2.fromOffset(w,32)
+    b.Position=UDim2.fromOffset(x,y)
+    b.BackgroundColor3=Color3.fromRGB(55,65,85)
+    b.TextColor3=Color3.new(1,1,1)
+    b.Font=Enum.Font.GothamBold
+    b.TextSize=13
+    b.Text=text
+    b.Parent=frame
+    Instance.new("UICorner",b).CornerRadius=UDim.new(0,7)
+    table.insert(connections,b.MouseButton1Click:Connect(callback))
+    return b
+end
+makeButton(35,"KILL AURA",function()return killOn end,function(v)killOn=v end)
+makeButton(75,"SKY TP",function()return skyOn end,function(v)
+    skyOn=v
+    if v then makePlatform() else removePlatform() end
+end)
+makeButton(115,"AUTO BUY",function()return buyOn end,function(v)buyOn=v end)
+makeButton(155,"AUTO EQUIP",function()return equipOn end,function(v)equipOn=v end)
+makeButton(195,"BOSS AUTO DODGE",function()return bossDodgeOn end,function(v)
+    bossDodgeOn=v
+    if not v and dodgeReason:find("BOSS",1,true) then returnHome() end
+end)
+makeButton(235,"ROCK AUTO DODGE",function()return rockDodgeOn end,function(v)
+    rockDodgeOn=v
+    if not v and dodgeReason:find("ROCK",1,true) then returnHome() end
+end)
+makeButton(275,"PUMPKIN CANNON DODGE",function()return pumpkinDodgeOn end,function(v)
+    pumpkinDodgeOn=v
+    if not v and dodgeReason:find("PUMPKIN",1,true) then returnHome() end
+end)
+local heightLabel=Instance.new("TextLabel")
+heightLabel.Size=UDim2.fromOffset(270,24)
+heightLabel.Position=UDim2.fromOffset(10,319)
+heightLabel.BackgroundTransparency=1
+heightLabel.TextColor3=Color3.new(1,1,1)
+heightLabel.Text="Sky Height: 30 studs"
+heightLabel.Parent=frame
+makeAction("-5",10,347,130,function()
+    SKY_HEIGHT=math.max(5,SKY_HEIGHT-5)
+    heightLabel.Text="Sky Height: "..SKY_HEIGHT.." studs"
+    updateHeight()
+end)
+makeAction("+5",150,347,130,function()
+    SKY_HEIGHT=math.min(150,SKY_HEIGHT+5)
+    heightLabel.Text="Sky Height: "..SKY_HEIGHT.." studs"
+    updateHeight()
+end)
+local status=Instance.new("TextLabel")
+status.Size=UDim2.fromOffset(270,94)
+status.Position=UDim2.fromOffset(10,385)
+status.BackgroundTransparency=1
+status.TextColor3=Color3.new(1,1,1)
+status.TextSize=12
+status.TextWrapped=true
+status.Text="Starting..."
+status.Parent=frame
+local function stop()
+    if not running then return end
+    running=false
+    killOn,skyOn,buyOn,equipOn=false,false,false,false
+    bossDodgeOn,rockDodgeOn,pumpkinDodgeOn=false,false,false
+    for _,connection in ipairs(connections) do
+        pcall(function()connection:Disconnect() end)
+    end
+    removePlatform()
+    if gui then gui:Destroy() end
+    _G.ZombieAllInOneStop=nil
+    _G.ZombieBossDodgeStop=nil
+    print("Zombie Arena V5 stopped.")
+end
+_G.ZombieAllInOneStop=stop
+_G.ZombieBossDodgeStop=stop
+makeAction("REMOVE SCRIPT",10,487,270,stop)
+
+table.insert(connections,RunService.Heartbeat:Connect(function()
+    if not running or not skyOn or not platform then return end
+    local root=getRoot()
+    if not root then return end
+    cleanThreats()
+    if dodgeTarget then
+        if os.clock()>=dodgeUntil then
+            -- Do not return into a currently active impact area.
+            local homeSafe=true
+            for _,threat in ipairs(threats) do
+                if flat(home-threat.pos).Magnitude<=threat.radius then
+                    homeSafe=false
+                    dodgeUntil=math.max(dodgeUntil,threat.expires+0.1)
+                end
+            end
+            if homeSafe then returnHome() end
+        else
+            local desired=Vector3.new(dodgeTarget.X,standingY(),dodgeTarget.Z)
+            if (root.Position-desired).Magnitude>1 then root.CFrame=CFrame.new(desired) end
+            if dodgePlatform then
+                dodgePlatform.Position=Vector3.new(dodgeTarget.X,platformY(),dodgeTarget.Z)
+            end
+        end
+    else
+        platform.Position=Vector3.new(root.Position.X,platform.Position.Y,root.Position.Z)
+    end
+end))
+table.insert(connections,player.CharacterAdded:Connect(function()
+    task.wait(1)
+    if not running then return end
+    if skyOn then makePlatform() end
+    if equipOn then equipBest() end
+end))
+task.spawn(function()
+    while running do
+        if equipOn then equipBest() end
+        task.wait(0.5)
+    end
+end)
+-- Original V4 kill aura preserved.
+task.spawn(function()
+    local cursor=1
+    while running do
+        task.wait(ATTACK_INTERVAL)
+        if not killOn then continue end
+        local zombies={}
+        for _,model in ipairs(zombieFolder:GetChildren()) do
+            local root=model:FindFirstChild("HumanoidRootPart")
+            if root then
+                local id=tonumber(model.Name:match("(%d+)$"))
+                if id then table.insert(zombies,{id=id,root=root}) end
+            end
+        end
+        if #zombies==0 then cursor=1;continue end
+        local weapon=currentWeapon()
+        local hits=math.min(MAX_HITS,#zombies)
+        for i=1,hits do
+            if not running or not killOn then break end
+            if cursor>#zombies then cursor=1 end
+            local zombie=zombies[cursor]
+            cursor+=1
+            if zombie.root.Parent then
+                pcall(function()
+                    gunHit:FireServer(weapon,zombie.id,zombie.root.Position)
+                end)
+            end
+        end
+    end
+end)
+-- Original V4 auto-buy preserved.
+task.spawn(function()
+    while running do
+        task.wait(BUY_INTERVAL)
+        if not buyOn then continue end
+        local nextUpgrade=getNextUpgrade()
+        local normalized=normalize(nextUpgrade)
+        if normalized:find("P90",1,true) or normalized:find("SCARH",1,true) then
+            lastUpgrade=nextUpgrade
+            pcall(function()weaponBuy:FireServer() end)
+        elseif nextUpgrade~="" then
+            healthUnlocked=true
+        end
+        if healthUnlocked then
+            lastUpgrade="Health upgrades"
+            pcall(function()healthBuy:FireServer() end)
+        end
+    end
+end)
+task.spawn(function()
+    while running do
+        task.wait(0.5)
+        if status.Parent then
+            local remaining=math.max(0,dodgeUntil-os.clock())
+            status.Text="Zombies: "..#zombieFolder:GetChildren().." | Next: "..lastUpgrade
+                .."\nRock: "..rocksDodged.." | Boss: "..bossesDodged
+                .." | Pumpkin: "..pumpkinsDodged.."/"..pumpkinsDetected
+                .."\nDodge: "..dodgeReason.." | Hold: "..string.format("%.1f",remaining)
+                .."s\nAuto-Skip: OFF"
+        end
+    end
+end)
+task.delay(1,function()
+    if not running then return end
+    if skyOn then makePlatform() end
+    if equipOn then equipBest() end
+end)
+print("ZOMBIE ARENA ALL-IN-ONE V5 | Pumpkin Cannon Dodge: ON | Auto-Skip: OFF")
