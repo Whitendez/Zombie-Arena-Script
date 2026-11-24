@@ -1,4 +1,4 @@
-    -- ZOMBIE ARENA ALL-IN-ONE V6 | Pumpkin + Pirate Projectile Dodge
+-- ZOMBIE ARENA ALL-IN-ONE V6 | Pumpkin + Pirate Projectile Dodge
 -- Original V4 behavior retained; shared sky/boss/rock/pumpkin dodge.
 for _, name in ipairs({"ZombieAllInOneStop","ZombieBossDodgeStop","PumpkinDodgeStop","ZombieMacroStop"}) do
     if type(_G[name]) == "function" then pcall(_G[name]) end
@@ -323,7 +323,7 @@ gui.DisplayOrder=150
 gui.Parent=playerGui
 local frame=Instance.new("Frame")
 frame.Size=UDim2.fromOffset(290,685)
-frame.Position=UDim2.new(0.5,-145,0.12,0)
+frame.Position=UDim2.new(1,-300,0.12,0)
 frame.BackgroundColor3=Color3.fromRGB(25,25,30)
 frame.Active=true
 frame.Draggable=true
