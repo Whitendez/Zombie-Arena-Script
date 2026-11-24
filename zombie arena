@@ -1,4 +1,4 @@
--- ZOMBIE ARENA ALL-IN-ONE V14 | Pumpkin + Pirate Projectile Dodge
+-- ZOMBIE ARENA ALL-IN-ONE V15 | Pumpkin + Pirate Projectile Dodge
 -- Original V4 behavior retained; shared sky/boss/rock/pumpkin dodge.
 for _, name in ipairs({"ZombieAllInOneStop","ZombieBossDodgeStop","PumpkinDodgeStop","ZombieMacroStop"}) do
     if type(_G[name]) == "function" then pcall(_G[name]) end
@@ -333,7 +333,7 @@ Instance.new("UICorner",frame).CornerRadius=UDim.new(0,10)
 local title=Instance.new("TextLabel")
 title.Size=UDim2.new(1,0,0,30)
 title.BackgroundTransparency=1
-title.Text="ZOMBIE ARENA | ALL IN ONE V14"
+title.Text="ZOMBIE ARENA | ALL IN ONE V15"
 title.TextColor3=Color3.new(1,1,1)
 title.Font=Enum.Font.GothamBold
 title.TextSize=14
@@ -435,7 +435,7 @@ local function stop()
     if gui then gui:Destroy() end
     _G.ZombieAllInOneStop=nil
     _G.ZombieBossDodgeStop=nil
-    print("Zombie Arena V14 stopped.")
+    print("Zombie Arena V15 stopped.")
 end
 _G.ZombieAllInOneStop=stop
 _G.ZombieBossDodgeStop=stop
@@ -514,9 +514,8 @@ local function visible(obj)
     end
     return obj==playerGui
 end
--- Hold left mouse during active gameplay, without moving the camera.
+-- Repeat the verified five-second mouse hold.
 local held, shotX, shotY = false, 0, 0
-local shootError = false
 releaseShoot = function()
     if not held then return end
     local ok, err = pcall(function()
@@ -524,36 +523,37 @@ releaseShoot = function()
     end)
     if ok then held=false else warn("Auto Shoot release:",err) end
 end
+local function canShoot()
+    local over=playerGui:FindFirstChild("GameOver")
+    local canvas=over and over:FindFirstChild("ResultsCanvas")
+    local stack=canvas and canvas:FindFirstChild("ContentStack")
+    local replay=stack and stack:FindFirstChild("PlayAgain")
+    local char=player.Character
+    local hum=char and char:FindFirstChildOfClass("Humanoid")
+    return running and shootOn and hum and hum.Health>0
+        and not resetSent and not (replay and visible(replay))
+        and not game:GetService("UserInputService"):GetFocusedTextBox()
+end
 task.spawn(function()
     while running do
-        local over=playerGui:FindFirstChild("GameOver")
-        local canvas=over and over:FindFirstChild("ResultsCanvas")
-        local stack=canvas and canvas:FindFirstChild("ContentStack")
-        local replay=stack and stack:FindFirstChild("PlayAgain")
-        local char=player.Character
-        local hum=char and char:FindFirstChildOfClass("Humanoid")
-        local tool=char and char:FindFirstChildOfClass("Tool")
-        local active=shootOn and hum and hum.Health>0 and tool
-            and not resetSent and not (replay and visible(replay))
-            and not game:GetService("UserInputService"):GetFocusedTextBox()
-        if active and not held and not shootError then
-            local camera=workspace.CurrentCamera
-            if camera then
-                shotX=math.floor(camera.ViewportSize.X/2)
-                shotY=math.floor(camera.ViewportSize.Y/2)
-                local ok,err=pcall(function()
-                    VIM:SendMouseButtonEvent(shotX,shotY,0,true,game,0)
-                end)
-                held=ok
-                if not ok then
-                    shootError=true
-                    warn("Auto Shoot:",err)
-                    if setclipboard then pcall(setclipboard,tostring(err)) end
-                end
+        if canShoot() and workspace.CurrentCamera and not held then
+            local center=workspace.CurrentCamera.ViewportSize / 2
+            shotX,shotY=center.X,center.Y
+            local ok,err=pcall(function()
+                VIM:SendMouseButtonEvent(shotX,shotY,0,true,game,0)
+            end)
+            if ok then
+                held=true
+                local deadline=os.clock()+5
+                repeat task.wait(0.05) until not held or not canShoot() or os.clock()>=deadline
+                releaseShoot()
+            else
+                warn("Auto Shoot:",err)
+                if setclipboard then pcall(setclipboard,tostring(err)) end
+                task.wait(2)
             end
-        elseif not active then
+        elseif held then
             releaseShoot()
-            shootError=false
         end
         task.wait(0.1)
     end
@@ -744,4 +744,4 @@ task.delay(1,function()
     if skyOn then makePlatform() end
     if equipOn then equipBest() end
 end)
-print("ZOMBIE ARENA ALL-IN-ONE V14 | Pumpkin + Pirate Dodge: ON | Auto-Skip: OFF")
+print("ZOMBIE ARENA ALL-IN-ONE V15 | Pumpkin + Pirate Dodge: ON | Auto-Skip: OFF")
