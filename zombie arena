@@ -1,4 +1,4 @@
--- ZOMBIE ARENA ALL-IN-ONE V16 | Pumpkin + Pirate Projectile Dodge
+-- ZOMBIE ARENA ALL-IN-ONE V17 | Pumpkin + Pirate Projectile Dodge
 -- Original V4 behavior retained; shared sky/boss/rock/pumpkin dodge.
 for _, name in ipairs({"ZombieAllInOneStop","ZombieBossDodgeStop","PumpkinDodgeStop","ZombieMacroStop"}) do
     if type(_G[name]) == "function" then pcall(_G[name]) end
@@ -19,6 +19,14 @@ local bossRemotes = remotes:WaitForChild("BossRemotes")
 
 local running = true
 local shootOn = true
+local chestOn, chestBusy = true, false
+local function chestPrompt()
+    local folder=workspace:FindFirstChild("RaidChests")
+    local chest=folder and folder:FindFirstChild("RaidChest")
+    local part=chest and chest:FindFirstChild("Part")
+    local prompt=part and part:FindFirstChild("RaidChestOpen")
+    if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled and part:IsA("BasePart") then return prompt,part end
+end
 local killOn, skyOn, buyOn, equipOn = true, true, true, true
 local bossDodgeOn, rockDodgeOn, pumpkinDodgeOn, pirateDodgeOn = true, true, true, true
 local SKY_HEIGHT, ATTACK_INTERVAL, MAX_HITS, BUY_INTERVAL = 30, 0.15, 20, 2
@@ -358,7 +366,7 @@ gui.ResetOnSpawn=false
 gui.DisplayOrder=150
 gui.Parent=playerGui
 local frame=Instance.new("Frame")
-frame.Size=UDim2.fromOffset(290,765)
+frame.Size=UDim2.fromOffset(290,805)
 frame.Position=UDim2.new(1,-300,0.12,0)
 frame.BackgroundColor3=Color3.fromRGB(25,25,30)
 frame.Active=true
@@ -368,7 +376,7 @@ Instance.new("UICorner",frame).CornerRadius=UDim.new(0,10)
 local title=Instance.new("TextLabel")
 title.Size=UDim2.new(1,0,0,30)
 title.BackgroundTransparency=1
-title.Text="ZOMBIE ARENA | ALL IN ONE V16"
+title.Text="ZOMBIE ARENA | ALL IN ONE V17"
 title.TextColor3=Color3.new(1,1,1)
 title.Font=Enum.Font.GothamBold
 title.TextSize=14
@@ -471,7 +479,7 @@ local function stop()
     if gui then gui:Destroy() end
     _G.ZombieAllInOneStop=nil
     _G.ZombieBossDodgeStop=nil
-    print("Zombie Arena V16 stopped.")
+    print("Zombie Arena V17 stopped.")
 end
 _G.ZombieAllInOneStop=stop
 _G.ZombieBossDodgeStop=stop
@@ -541,7 +549,8 @@ macroLabel.TextSize=12
 macroLabel.Parent=frame
 makeButton(640,"AUTO SHOOT",function() return shootOn end,function(v) shootOn=v end)
 makeButton(680,"SOUL CANNON AUTO DODGE",function() return soulDodgeOn end,function(v) soulDodgeOn=v end)
-makeAction("REMOVE SCRIPT",10,723,270,stop)
+makeButton(720,"AUTO CHEST",function() return chestOn end,function(v) chestOn=v end)
+makeAction("REMOVE SCRIPT",10,763,270,stop)
 
 local function visible(obj)
     while obj and obj~=playerGui do
@@ -567,7 +576,7 @@ local function canShoot()
     local replay=stack and stack:FindFirstChild("PlayAgain")
     local char=player.Character
     local hum=char and char:FindFirstChildOfClass("Humanoid")
-    return running and shootOn and hum and hum.Health>0
+    return running and shootOn and not chestBusy and not (chestOn and chestPrompt()) and hum and hum.Health>0
         and not resetSent and not (replay and visible(replay))
         and not game:GetService("UserInputService"):GetFocusedTextBox()
 end
@@ -597,6 +606,45 @@ task.spawn(function()
     releaseShoot()
 end)
 
+-- Raid chest collection
+ task.spawn(function()
+    while running do
+        local prompt,part=chestPrompt()
+        local root=getRoot()
+        local hum=player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+        if chestOn and prompt and root and hum and hum.Health>0 then
+            chestBusy=true
+            releaseShoot()
+            local previous=root.CFrame
+            local hadSky=skyOn
+            removePlatform()
+            local ok,err=pcall(function()
+                for attempt=1,5 do
+                    if not running or not chestOn or not prompt.Parent or not prompt.Enabled or getRoot()~=root or hum.Health<=0 then break end
+                    root.CFrame=CFrame.new(part.Position+Vector3.new(0,3,0))
+                    task.wait(0.25)
+                    if not running or not chestOn or not prompt.Parent or not prompt.Enabled then break end
+                    VIM:SendKeyEvent(true,Enum.KeyCode.E,false,game)
+                    task.wait(0.1)
+                    VIM:SendKeyEvent(false,Enum.KeyCode.E,false,game)
+                    task.wait(0.8)
+                end
+            end)
+            if not ok then
+                pcall(function() VIM:SendKeyEvent(false,Enum.KeyCode.E,false,game) end)
+                warn("Auto Chest:",err)
+                if setclipboard then pcall(setclipboard,tostring(err)) end
+            end
+            if running and getRoot()==root and hum.Health>0 then
+                if hadSky and skyOn then root.CFrame=previous; root.CFrame=root.CFrame-Vector3.new(0,SKY_HEIGHT,0); makePlatform() end
+            end
+            chestBusy=false
+            task.wait(1)
+        end
+        task.wait(0.2)
+    end
+end)
+
 local function replayClick(button)
     releaseShoot()
     if held then error("Auto Shoot mouse release failed") end
@@ -611,7 +659,9 @@ local function replayClick(button)
 end
 task.spawn(function()
     while running do
-        if macroOn then
+        if chestBusy or (chestOn and chestPrompt()) then
+            macroStatus="Collecting raid chest..."
+        elseif macroOn then
             local target=targetWave
             local over=playerGui:FindFirstChild("GameOver")
             local canvas=over and over:FindFirstChild("ResultsCanvas")
@@ -658,7 +708,7 @@ task.spawn(function()
 end)
 
 table.insert(connections,RunService.Heartbeat:Connect(function()
-    if not running or not skyOn or not platform then return end
+    if not running or chestBusy or not skyOn or not platform then return end
     local root=getRoot()
     if not root then return end
     cleanThreats()
@@ -781,4 +831,4 @@ task.delay(1,function()
     if skyOn then makePlatform() end
     if equipOn then equipBest() end
 end)
-print("ZOMBIE ARENA ALL-IN-ONE V16 | Pumpkin + Pirate Dodge: ON | Auto-Skip: OFF")
+print("ZOMBIE ARENA ALL-IN-ONE V17 | Pumpkin + Pirate Dodge: ON | Auto-Skip: OFF")
