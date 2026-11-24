@@ -1,6 +1,6 @@
 -- ZOMBIE ARENA ALL-IN-ONE V6 | Pumpkin + Pirate Projectile Dodge
 -- Original V4 behavior retained; shared sky/boss/rock/pumpkin dodge.
-for _, name in ipairs({"ZombieAllInOneStop","ZombieBossDodgeStop","PumpkinDodgeStop"}) do
+for _, name in ipairs({"ZombieAllInOneStop","ZombieBossDodgeStop","PumpkinDodgeStop","ZombieMacroStop"}) do
     if type(_G[name]) == "function" then pcall(_G[name]) end
 end
 local Players = game:GetService("Players")
@@ -322,7 +322,7 @@ gui.ResetOnSpawn=false
 gui.DisplayOrder=150
 gui.Parent=playerGui
 local frame=Instance.new("Frame")
-frame.Size=UDim2.fromOffset(290,570)
+frame.Size=UDim2.fromOffset(290,685)
 frame.Position=UDim2.new(0.5,-145,0.12,0)
 frame.BackgroundColor3=Color3.fromRGB(25,25,30)
 frame.Active=true
@@ -332,7 +332,7 @@ Instance.new("UICorner",frame).CornerRadius=UDim.new(0,10)
 local title=Instance.new("TextLabel")
 title.Size=UDim2.new(1,0,0,30)
 title.BackgroundTransparency=1
-title.Text="ZOMBIE ARENA | ALL IN ONE V6"
+title.Text="ZOMBIE ARENA | ALL IN ONE V7"
 title.TextColor3=Color3.new(1,1,1)
 title.Font=Enum.Font.GothamBold
 title.TextSize=14
@@ -435,7 +435,100 @@ local function stop()
 end
 _G.ZombieAllInOneStop=stop
 _G.ZombieBossDodgeStop=stop
-makeAction("REMOVE SCRIPT",10,527,270,stop)
+local macroOn, resetSent, sawResults = false, false, false
+local macroStatus = "Disabled"
+local lastReplay = -math.huge
+local VIM = game:GetService("VirtualInputManager")
+local GuiService = game:GetService("GuiService")
+makeButton(525,"WAVE RESET + REPLAY",function() return macroOn end,function(v)
+    macroOn=v
+    resetSent=false
+    sawResults=false
+end)
+local waveBox=Instance.new("TextBox")
+waveBox.Size=UDim2.fromOffset(270,30)
+waveBox.Position=UDim2.fromOffset(10,565)
+waveBox.BackgroundColor3=Color3.fromRGB(45,45,50)
+waveBox.TextColor3=Color3.new(1,1,1)
+waveBox.Text="30"
+waveBox.PlaceholderText="Target wave"
+waveBox.ClearTextOnFocus=false
+waveBox.Parent=frame
+Instance.new("UICorner",waveBox)
+local macroLabel=Instance.new("TextLabel")
+macroLabel.Size=UDim2.fromOffset(270,38)
+macroLabel.Position=UDim2.fromOffset(10,598)
+macroLabel.BackgroundTransparency=1
+macroLabel.TextColor3=Color3.new(1,1,1)
+macroLabel.TextWrapped=true
+macroLabel.TextSize=12
+macroLabel.Parent=frame
+makeAction("REMOVE SCRIPT",10,643,270,stop)
+
+local function visible(obj)
+    while obj and obj~=playerGui do
+        if obj:IsA("GuiObject") and not obj.Visible then return false end
+        if obj:IsA("ScreenGui") and not obj.Enabled then return false end
+        obj=obj.Parent
+    end
+    return obj==playerGui
+end
+local function replayClick(button)
+    local p,s=button.AbsolutePosition,button.AbsoluteSize
+    local screen=button:FindFirstAncestorOfClass("ScreenGui")
+    local inset=GuiService:GetGuiInset()
+    local x=math.floor(p.X+s.X/2)
+    local y=math.floor(p.Y+s.Y/2+((screen and screen.IgnoreGuiInset) and 0 or inset.Y))
+    VIM:SendMouseButtonEvent(x,y,0,true,game,0)
+    task.wait(0.15)
+    VIM:SendMouseButtonEvent(x,y,0,false,game,0)
+end
+task.spawn(function()
+    while running do
+        if macroOn then
+            local target=math.max(1,math.floor(tonumber(waveBox.Text) or 30))
+            local over=playerGui:FindFirstChild("GameOver")
+            local canvas=over and over:FindFirstChild("ResultsCanvas")
+            local stack=canvas and canvas:FindFirstChild("ContentStack")
+            local replay=stack and stack:FindFirstChild("PlayAgain")
+            if replay and visible(replay) then
+                sawResults=true
+                if os.clock()-lastReplay>=3 then
+                    lastReplay=os.clock()
+                    local ok,err=pcall(replayClick,replay)
+                    macroStatus=ok and "Replay click sent" or "Replay click failed"
+                    if not ok then
+                        warn(err)
+                        if setclipboard then pcall(setclipboard,tostring(err)) end
+                    end
+                end
+            else
+                if sawResults then resetSent=false; sawResults=false end
+                local main=playerGui:FindFirstChild("MainGui")
+                local label=main and main:FindFirstChild("WaveLabel")
+                local wave=label and tonumber(label.Text:match("Wave%s+(%d+)"))
+                if wave then
+                    macroStatus="Wave "..wave.." / "..target
+                    if wave>=target and not resetSent then
+                        local char=player.Character
+                        local hum=char and char:FindFirstChildOfClass("Humanoid")
+                        if hum and hum.Health>0 then
+                            resetSent=true
+                            hum.Health=0
+                        end
+                    end
+                    if resetSent then macroStatus="Waiting for results" end
+                else
+                    macroStatus="Waiting for wave"
+                end
+            end
+        else
+            macroStatus="Disabled"
+        end
+        if running then macroLabel.Text=macroStatus end
+        task.wait(0.25)
+    end
+end)
 
 table.insert(connections,RunService.Heartbeat:Connect(function()
     if not running or not skyOn or not platform then return end
@@ -545,4 +638,3 @@ task.delay(1,function()
     if equipOn then equipBest() end
 end)
 print("ZOMBIE ARENA ALL-IN-ONE V6 | Pumpkin + Pirate Dodge: ON | Auto-Skip: OFF")
-
