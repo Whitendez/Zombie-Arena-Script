@@ -1,4 +1,4 @@
--- ZOMBIE ARENA ALL-IN-ONE V11 | Pumpkin + Pirate Projectile Dodge
+-- ZOMBIE ARENA ALL-IN-ONE V13 | Pumpkin + Pirate Projectile Dodge
 -- Original V4 behavior retained; shared sky/boss/rock/pumpkin dodge.
 for _, name in ipairs({"ZombieAllInOneStop","ZombieBossDodgeStop","PumpkinDodgeStop","ZombieMacroStop"}) do
     if type(_G[name]) == "function" then pcall(_G[name]) end
@@ -18,6 +18,7 @@ local zombieRemotes = remotes:WaitForChild("ZombieRemotes")
 local bossRemotes = remotes:WaitForChild("BossRemotes")
 
 local running = true
+local shootOn = true
 local killOn, skyOn, buyOn, equipOn = true, true, true, true
 local bossDodgeOn, rockDodgeOn, pumpkinDodgeOn, pirateDodgeOn = true, true, true, true
 local SKY_HEIGHT, ATTACK_INTERVAL, MAX_HITS, BUY_INTERVAL = 30, 0.15, 20, 2
@@ -65,7 +66,7 @@ local function getBestWeapon()
             if normalize(tool.Name)==normalize(name) then return tool end
         end
     end
-    return find("SCAR-H") or find("P90") or find("Pistol") or find("ShotGun")
+    return find("Star Shooter") or find("SCAR-H") or find("P90") or find("Pistol") or find("ShotGun")
         or find("Rifle") or find("Minigun") or tools[1]
 end
 local function equipBest()
@@ -322,7 +323,7 @@ gui.ResetOnSpawn=false
 gui.DisplayOrder=150
 gui.Parent=playerGui
 local frame=Instance.new("Frame")
-frame.Size=UDim2.fromOffset(290,685)
+frame.Size=UDim2.fromOffset(290,725)
 frame.Position=UDim2.new(1,-300,0.12,0)
 frame.BackgroundColor3=Color3.fromRGB(25,25,30)
 frame.Active=true
@@ -332,7 +333,7 @@ Instance.new("UICorner",frame).CornerRadius=UDim.new(0,10)
 local title=Instance.new("TextLabel")
 title.Size=UDim2.new(1,0,0,30)
 title.BackgroundTransparency=1
-title.Text="ZOMBIE ARENA | ALL IN ONE V11"
+title.Text="ZOMBIE ARENA | ALL IN ONE V13"
 title.TextColor3=Color3.new(1,1,1)
 title.Font=Enum.Font.GothamBold
 title.TextSize=14
@@ -422,6 +423,7 @@ status.Parent=frame
 local function stop()
     if not running then return end
     running=false
+    shootOn=false
     killOn,skyOn,buyOn,equipOn=false,false,false,false
     bossDodgeOn,rockDodgeOn,pumpkinDodgeOn,pirateDodgeOn=false,false,false,false
     for _,connection in ipairs(connections) do
@@ -431,7 +433,7 @@ local function stop()
     if gui then gui:Destroy() end
     _G.ZombieAllInOneStop=nil
     _G.ZombieBossDodgeStop=nil
-    print("Zombie Arena V11 stopped.")
+    print("Zombie Arena V13 stopped.")
 end
 _G.ZombieAllInOneStop=stop
 _G.ZombieBossDodgeStop=stop
@@ -499,7 +501,8 @@ macroLabel.TextColor3=Color3.new(1,1,1)
 macroLabel.TextWrapped=true
 macroLabel.TextSize=12
 macroLabel.Parent=frame
-makeAction("REMOVE SCRIPT",10,643,270,stop)
+makeButton(640,"AUTO SHOOT",function() return shootOn end,function(v) shootOn=v end)
+makeAction("REMOVE SCRIPT",10,683,270,stop)
 
 local function visible(obj)
     while obj and obj~=playerGui do
@@ -509,6 +512,27 @@ local function visible(obj)
     end
     return obj==playerGui
 end
+-- Fire the equipped tool without changing aim or sending mouse clicks.
+task.spawn(function()
+    while running do
+        if shootOn then
+            local over=playerGui:FindFirstChild("GameOver")
+            local canvas=over and over:FindFirstChild("ResultsCanvas")
+            local stack=canvas and canvas:FindFirstChild("ContentStack")
+            local replay=stack and stack:FindFirstChild("PlayAgain")
+            local char=player.Character
+            local hum=char and char:FindFirstChildOfClass("Humanoid")
+            local tool=char and char:FindFirstChildOfClass("Tool")
+            if hum and hum.Health>0 and tool and not (replay and visible(replay)) then
+                pcall(function() tool:Activate() end)
+                task.wait(0.08)
+                pcall(function() tool:Deactivate() end)
+            end
+        end
+        task.wait(0.12)
+    end
+end)
+
 local function replayClick(button)
     local p,s=button.AbsolutePosition,button.AbsoluteSize
     local screen=button:FindFirstAncestorOfClass("ScreenGui")
@@ -660,12 +684,13 @@ task.spawn(function()
             lastUpgrade="Waiting for character"
             continue
         end
-        healthUnlocked=ownsWeapon("SCAR-H")
+        healthUnlocked=ownsWeapon("Star Shooter")
         if healthUnlocked then
-            lastUpgrade="Health upgrades (SCAR-H owned)"
+            lastUpgrade="Health upgrades (Star Shooter owned)"
             pcall(function() healthBuy:FireServer() end)
         else
-            lastUpgrade=ownsWeapon("P90") and "Waiting for SCAR-H" or "Waiting for P90"
+            lastUpgrade=ownsWeapon("SCAR-H") and "Waiting for Star Shooter"
+                or (ownsWeapon("P90") and "Waiting for SCAR-H" or "Waiting for P90")
             pcall(function() weaponBuy:FireServer() end)
         end
     end
@@ -689,4 +714,4 @@ task.delay(1,function()
     if skyOn then makePlatform() end
     if equipOn then equipBest() end
 end)
-print("ZOMBIE ARENA ALL-IN-ONE V11 | Pumpkin + Pirate Dodge: ON | Auto-Skip: OFF")
+print("ZOMBIE ARENA ALL-IN-ONE V13 | Pumpkin + Pirate Dodge: ON | Auto-Skip: OFF")
