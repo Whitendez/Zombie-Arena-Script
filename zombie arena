@@ -1,4 +1,4 @@
--- ZOMBIE ARENA ALL-IN-ONE V15 | Pumpkin + Pirate Projectile Dodge
+-- ZOMBIE ARENA ALL-IN-ONE V16 | Pumpkin + Pirate Projectile Dodge
 -- Original V4 behavior retained; shared sky/boss/rock/pumpkin dodge.
 for _, name in ipairs({"ZombieAllInOneStop","ZombieBossDodgeStop","PumpkinDodgeStop","ZombieMacroStop"}) do
     if type(_G[name]) == "function" then pcall(_G[name]) end
@@ -276,13 +276,48 @@ table.insert(connections,shootRemote.OnClientEvent:Connect(function(...)
     for i=1,args.n do handleShotPacket(args[i]) end
 end))
 
+local soulDodgeOn = true
 local function handleBossAbility(data)
-    if not running or not bossDodgeOn or not skyOn then return end
+    if not running or not skyOn then return end
     if type(data)~="table" or data.Phase~="Telegraph" then return end
     local cast=data.Cast
     if type(cast)~="table" then return end
     local root=getRoot()
     if not root or not home then return end
+    if data.AbilityId == "FlyingDutchmanSoulCannon" then
+        if not soulDodgeOn or not platform then return end
+        local current = dodgeTarget or root.Position
+        local radius = tonumber(cast.Radius) or 9
+        local duration = 1.5
+        if type(cast.RecoveryEndAt)=="number" and type(data.ServerTime)=="number" then
+            duration=math.max(duration,cast.RecoveryEndAt-data.ServerTime+0.4)
+        end
+        local targets = {}
+        if type(cast.TargetPositions)=="table" then
+            for _,v in pairs(cast.TargetPositions) do
+                local pos=getVector(v)
+                if pos then table.insert(targets,pos) end
+            end
+        end
+        if #targets==0 then
+            local pos=getVector(cast.FacingPosition)
+            if pos then table.insert(targets,pos) end
+        end
+        local danger=false
+        for _,pos in ipairs(targets) do
+            registerThreat(pos,duration,radius+4)
+            if flat(current-pos).Magnitude<=radius+4 then danger=true end
+        end
+        if danger then
+            local destination=safeCandidate(current,25)
+            if destination then
+                bossesDodged+=1
+                startDodge(destination,duration,"SOUL CANNON")
+            end
+        end
+        return
+    end
+    if not bossDodgeOn then return end
     local origin=getVector(cast.Origin)
     if not origin then return end
     local ability=tostring(data.AbilityId or "Unknown")
@@ -323,7 +358,7 @@ gui.ResetOnSpawn=false
 gui.DisplayOrder=150
 gui.Parent=playerGui
 local frame=Instance.new("Frame")
-frame.Size=UDim2.fromOffset(290,725)
+frame.Size=UDim2.fromOffset(290,765)
 frame.Position=UDim2.new(1,-300,0.12,0)
 frame.BackgroundColor3=Color3.fromRGB(25,25,30)
 frame.Active=true
@@ -333,7 +368,7 @@ Instance.new("UICorner",frame).CornerRadius=UDim.new(0,10)
 local title=Instance.new("TextLabel")
 title.Size=UDim2.new(1,0,0,30)
 title.BackgroundTransparency=1
-title.Text="ZOMBIE ARENA | ALL IN ONE V15"
+title.Text="ZOMBIE ARENA | ALL IN ONE V16"
 title.TextColor3=Color3.new(1,1,1)
 title.Font=Enum.Font.GothamBold
 title.TextSize=14
@@ -425,6 +460,7 @@ local function stop()
     if not running then return end
     running=false
     shootOn=false
+    soulDodgeOn=false
     if releaseShoot then releaseShoot() end
     killOn,skyOn,buyOn,equipOn=false,false,false,false
     bossDodgeOn,rockDodgeOn,pumpkinDodgeOn,pirateDodgeOn=false,false,false,false
@@ -435,7 +471,7 @@ local function stop()
     if gui then gui:Destroy() end
     _G.ZombieAllInOneStop=nil
     _G.ZombieBossDodgeStop=nil
-    print("Zombie Arena V15 stopped.")
+    print("Zombie Arena V16 stopped.")
 end
 _G.ZombieAllInOneStop=stop
 _G.ZombieBossDodgeStop=stop
@@ -504,7 +540,8 @@ macroLabel.TextWrapped=true
 macroLabel.TextSize=12
 macroLabel.Parent=frame
 makeButton(640,"AUTO SHOOT",function() return shootOn end,function(v) shootOn=v end)
-makeAction("REMOVE SCRIPT",10,683,270,stop)
+makeButton(680,"SOUL CANNON AUTO DODGE",function() return soulDodgeOn end,function(v) soulDodgeOn=v end)
+makeAction("REMOVE SCRIPT",10,723,270,stop)
 
 local function visible(obj)
     while obj and obj~=playerGui do
@@ -744,4 +781,4 @@ task.delay(1,function()
     if skyOn then makePlatform() end
     if equipOn then equipBest() end
 end)
-print("ZOMBIE ARENA ALL-IN-ONE V15 | Pumpkin + Pirate Dodge: ON | Auto-Skip: OFF")
+print("ZOMBIE ARENA ALL-IN-ONE V16 | Pumpkin + Pirate Dodge: ON | Auto-Skip: OFF")
