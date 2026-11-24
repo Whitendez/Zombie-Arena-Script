@@ -1,4 +1,4 @@
--- ZOMBIE ARENA ALL-IN-ONE V6 | Pumpkin + Pirate Projectile Dodge
+    -- ZOMBIE ARENA ALL-IN-ONE V6 | Pumpkin + Pirate Projectile Dodge
 -- Original V4 behavior retained; shared sky/boss/rock/pumpkin dodge.
 for _, name in ipairs({"ZombieAllInOneStop","ZombieBossDodgeStop","PumpkinDodgeStop","ZombieMacroStop"}) do
     if type(_G[name]) == "function" then pcall(_G[name]) end
@@ -332,7 +332,7 @@ Instance.new("UICorner",frame).CornerRadius=UDim.new(0,10)
 local title=Instance.new("TextLabel")
 title.Size=UDim2.new(1,0,0,30)
 title.BackgroundTransparency=1
-title.Text="ZOMBIE ARENA | ALL IN ONE V7"
+title.Text="ZOMBIE ARENA | ALL IN ONE V9"
 title.TextColor3=Color3.new(1,1,1)
 title.Font=Enum.Font.GothamBold
 title.TextSize=14
@@ -435,8 +435,19 @@ local function stop()
 end
 _G.ZombieAllInOneStop=stop
 _G.ZombieBossDodgeStop=stop
-local macroOn, resetSent, sawResults = false, false, false
-local macroStatus = "Disabled"
+local macroOn, resetSent, sawResults = true, false, false
+local configFile = "ZombieArena_TargetWave.txt"
+local targetWave = 30
+local waveLocked = false
+if type(readfile)=="function" then
+    local ok, saved = pcall(readfile, configFile)
+    local n = ok and tonumber(saved)
+    if n and n >= 1 and n <= 1000000 then
+        targetWave = math.floor(n)
+        waveLocked = true
+    end
+end
+local macroStatus = "Waiting for wave "..targetWave
 local lastReplay = -math.huge
 local VIM = game:GetService("VirtualInputManager")
 local GuiService = game:GetService("GuiService")
@@ -446,15 +457,40 @@ makeButton(525,"WAVE RESET + REPLAY",function() return macroOn end,function(v)
     sawResults=false
 end)
 local waveBox=Instance.new("TextBox")
-waveBox.Size=UDim2.fromOffset(270,30)
+waveBox.Size=UDim2.fromOffset(125,30)
 waveBox.Position=UDim2.fromOffset(10,565)
 waveBox.BackgroundColor3=Color3.fromRGB(45,45,50)
 waveBox.TextColor3=Color3.new(1,1,1)
-waveBox.Text="30"
+waveBox.Text=tostring(targetWave)
+waveBox.TextEditable=not waveLocked
 waveBox.PlaceholderText="Target wave"
 waveBox.ClearTextOnFocus=false
 waveBox.Parent=frame
 Instance.new("UICorner",waveBox)
+local lockButton
+lockButton=makeAction(waveLocked and "UNLOCK" or "LOCK + SAVE",145,565,135,function()
+    if waveLocked then
+        waveLocked=false
+        waveBox.TextEditable=true
+        lockButton.Text="LOCK + SAVE"
+        return
+    end
+    local n=tonumber(waveBox.Text)
+    if not n or n<1 or n>1000000 or n~=math.floor(n) then
+        waveBox.Text=tostring(targetWave)
+        lockButton.Text="INVALID WAVE"
+        return
+    end
+    targetWave=n
+    waveBox.Text=tostring(n)
+    waveLocked=true
+    waveBox.TextEditable=false
+    local saved=false
+    if type(writefile)=="function" then
+        saved=pcall(writefile,configFile,tostring(n))
+    end
+    lockButton.Text=saved and "UNLOCK (SAVED)" or "UNLOCK (TEMP)"
+end)
 local macroLabel=Instance.new("TextLabel")
 macroLabel.Size=UDim2.fromOffset(270,38)
 macroLabel.Position=UDim2.fromOffset(10,598)
@@ -478,7 +514,7 @@ local function replayClick(button)
     local screen=button:FindFirstAncestorOfClass("ScreenGui")
     local inset=GuiService:GetGuiInset()
     local x=math.floor(p.X+s.X/2)
-    local y=math.floor(p.Y+s.Y/2+((screen and screen.IgnoreGuiInset) and 0 or inset.Y))
+    local y=math.floor(p.Y+s.Y/2+60)
     VIM:SendMouseButtonEvent(x,y,0,true,game,0)
     task.wait(0.15)
     VIM:SendMouseButtonEvent(x,y,0,false,game,0)
@@ -486,7 +522,7 @@ end
 task.spawn(function()
     while running do
         if macroOn then
-            local target=math.max(1,math.floor(tonumber(waveBox.Text) or 30))
+            local target=targetWave
             local over=playerGui:FindFirstChild("GameOver")
             local canvas=over and over:FindFirstChild("ResultsCanvas")
             local stack=canvas and canvas:FindFirstChild("ContentStack")
