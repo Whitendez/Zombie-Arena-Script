@@ -1,4 +1,4 @@
--- ZOMBIE ARENA ALL-IN-ONE V6 | Pumpkin + Pirate Projectile Dodge
+-- ZOMBIE ARENA ALL-IN-ONE V11 | Pumpkin + Pirate Projectile Dodge
 -- Original V4 behavior retained; shared sky/boss/rock/pumpkin dodge.
 for _, name in ipairs({"ZombieAllInOneStop","ZombieBossDodgeStop","PumpkinDodgeStop","ZombieMacroStop"}) do
     if type(_G[name]) == "function" then pcall(_G[name]) end
@@ -332,7 +332,7 @@ Instance.new("UICorner",frame).CornerRadius=UDim.new(0,10)
 local title=Instance.new("TextLabel")
 title.Size=UDim2.new(1,0,0,30)
 title.BackgroundTransparency=1
-title.Text="ZOMBIE ARENA | ALL IN ONE V9"
+title.Text="ZOMBIE ARENA | ALL IN ONE V11"
 title.TextColor3=Color3.new(1,1,1)
 title.Font=Enum.Font.GothamBold
 title.TextSize=14
@@ -431,7 +431,7 @@ local function stop()
     if gui then gui:Destroy() end
     _G.ZombieAllInOneStop=nil
     _G.ZombieBossDodgeStop=nil
-    print("Zombie Arena V6 stopped.")
+    print("Zombie Arena V11 stopped.")
 end
 _G.ZombieAllInOneStop=stop
 _G.ZombieBossDodgeStop=stop
@@ -635,22 +635,38 @@ task.spawn(function()
         end
     end
 end)
--- Original V4 auto-buy preserved.
+-- Auto-buy: verify weapon ownership on every pass.
+local function ownsWeapon(name)
+    local function contains(container)
+        if not container then return false end
+        for _, item in ipairs(container:GetChildren()) do
+            if item:IsA("Tool") and normalize(item.Name)==normalize(name) then
+                return true
+            end
+        end
+        return false
+    end
+    return contains(player.Character) or contains(player:FindFirstChild("Backpack"))
+end
+
 task.spawn(function()
     while running do
         task.wait(BUY_INTERVAL)
-        if not buyOn then continue end
-        local nextUpgrade=getNextUpgrade()
-        local normalized=normalize(nextUpgrade)
-        if normalized:find("P90",1,true) or normalized:find("SCARH",1,true) then
-            lastUpgrade=nextUpgrade
-            pcall(function()weaponBuy:FireServer() end)
-        elseif nextUpgrade~="" then
-            healthUnlocked=true
+        if not running or not buyOn then continue end
+        local char=player.Character
+        local hum=char and char:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health<=0 then
+            healthUnlocked=false
+            lastUpgrade="Waiting for character"
+            continue
         end
+        healthUnlocked=ownsWeapon("SCAR-H")
         if healthUnlocked then
-            lastUpgrade="Health upgrades"
-            pcall(function()healthBuy:FireServer() end)
+            lastUpgrade="Health upgrades (SCAR-H owned)"
+            pcall(function() healthBuy:FireServer() end)
+        else
+            lastUpgrade=ownsWeapon("P90") and "Waiting for SCAR-H" or "Waiting for P90"
+            pcall(function() weaponBuy:FireServer() end)
         end
     end
 end)
@@ -673,4 +689,4 @@ task.delay(1,function()
     if skyOn then makePlatform() end
     if equipOn then equipBest() end
 end)
-print("ZOMBIE ARENA ALL-IN-ONE V6 | Pumpkin + Pirate Dodge: ON | Auto-Skip: OFF")
+print("ZOMBIE ARENA ALL-IN-ONE V11 | Pumpkin + Pirate Dodge: ON | Auto-Skip: OFF")
