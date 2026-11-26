@@ -74,8 +74,16 @@ local function getBestWeapon()
             if normalize(tool.Name)==normalize(name) then return tool end
         end
     end
-    return find("Star Shooter") or find("SCAR-H") or find("P90") or find("Pistol") or find("ShotGun")
-        or find("Rifle") or find("Minigun") or tools[1]
+    return find("Star Shooter")
+    or find("Laser Gun")
+    or find("SCAR-H")
+    or find("Deagle")
+    or find("P90")
+    or find("Pistol")
+    or find("ShotGun")
+    or find("Rifle")
+    or find("Minigun")
+    or tools[1]
 end
 local function equipBest()
     if not equipOn then return end
