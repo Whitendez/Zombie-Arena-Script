@@ -1,841 +1,1615 @@
--- ZOMBIE ARENA ALL-IN-ONE V17 | Pumpkin + Pirate Projectile Dodge
--- Original V4 behavior retained; shared sky/boss/rock/pumpkin dodge.
-for _, name in ipairs({"ZombieAllInOneStop","ZombieBossDodgeStop","PumpkinDodgeStop","ZombieMacroStop"}) do
-    if type(_G[name]) == "function" then pcall(_G[name]) end
+--[[
+	Zombie Arena 
+]]
+for _, globalName in ipairs({
+	"ZombieAllInOneStop",
+	"ZombieBossDodgeStop",
+	"PumpkinDodgeStop",
+	"ZombieMacroStop",
+}) do
+	if type(_G[globalName]) == "function" then
+		pcall(_G[globalName])
+	end
 end
+
+--// 1. Services & References \\--
 local Players = game:GetService("Players")
-local RS = game:GetService("ReplicatedStorage")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
-local remotes = RS:WaitForChild("Remotes")
-local gunHit = remotes:WaitForChild("GunRemotes"):WaitForChild("GunHit")
-local upgrades = remotes:WaitForChild("UpgradeRemotes")
-local weaponBuy = upgrades:WaitForChild("PurchaseWeaponUpgrade")
-local healthBuy = upgrades:WaitForChild("PurchaseHealthUpgrade")
-local zombieFolder = workspace:WaitForChild("Zombies_Local")
-local zombieRemotes = remotes:WaitForChild("ZombieRemotes")
-local bossRemotes = remotes:WaitForChild("BossRemotes")
-
-local running = true
-local shootOn = true
-local chestOn, chestBusy = true, false
-local function chestPrompt()
-    local folder=workspace:FindFirstChild("RaidChests")
-    local chest=folder and folder:FindFirstChild("RaidChest")
-    local part=chest and chest:FindFirstChild("Part")
-    local prompt=part and part:FindFirstChild("RaidChestOpen")
-    if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled and part:IsA("BasePart") then return prompt,part end
-end
-local killOn, skyOn, buyOn, equipOn = true, true, true, true
-local bossDodgeOn, rockDodgeOn, pumpkinDodgeOn, pirateDodgeOn = true, true, true, true
-local SKY_HEIGHT, ATTACK_INTERVAL, MAX_HITS, BUY_INTERVAL = 30, 0.15, 20, 2
-local ROCK_RADIUS, ROCK_DODGE_DISTANCE, ROCK_EXTRA_TIME = 9, 28, 0.6
-local PUMPKIN_RADIUS, PUMPKIN_DISTANCE, PUMPKIN_EXTRA_TIME = 14, 28, 1.1
-local PIRATE_RADIUS, PIRATE_DISTANCE, PIRATE_EXTRA_TIME = 10, 28, 0.9
-local connections = {}
-local platform, dodgePlatform, home, dodgeTarget
-local dodgeUntil, dodgeReason = 0, "None"
-local healthUnlocked, lastUpgrade = false, "Waiting..."
-local rocksDodged, bossesDodged, pumpkinsDodged, pumpkinsDetected = 0, 0, 0, 0
-local piratesDodged, piratesDetected = 0, 0
-local threats = {}
-
-local function normalize(s) return tostring(s):upper():gsub("[^%w]", "") end
-local function getRoot()
-    local char = player.Character
-    return char and char:FindFirstChild("HumanoidRootPart")
-end
-local function flat(v) return Vector3.new(v.X, 0, v.Z) end
-local function direction(v)
-    local f = flat(v)
-    return f.Magnitude < 0.01 and Vector3.new(1,0,0) or f.Unit
-end
-local function getVector(v)
-    if typeof(v) == "Vector3" then return v end
-    if type(v) == "table" then
-        local x,y,z = v.X or v.x or v[1], v.Y or v.y or v[2], v.Z or v.z or v[3]
-        if type(x)=="number" and type(y)=="number" and type(z)=="number" then
-            return Vector3.new(x,y,z)
-        end
-    end
-end
-local function getBestWeapon()
-    local tools = {}
-    for _, container in ipairs({player.Character, player:FindFirstChild("Backpack")}) do
-        if container then
-            for _, item in ipairs(container:GetChildren()) do
-                if item:IsA("Tool") then table.insert(tools,item) end
-            end
-        end
-    end
-    local function find(name)
-        for _,tool in ipairs(tools) do
-            if normalize(tool.Name)==normalize(name) then return tool end
-        end
-    end
-    return find("Star Shooter")
-    or find("Laser Gun")
-    or find("SCAR-H")
-    or find("P90")
-    or find("Pistol")
-    or find("ShotGun")
-    or find("Rifle")
-    or find("Minigun")
-    or tools[1]
-end
-local function equipBest()
-    if not equipOn then return end
-    local char = player.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    local tool = getBestWeapon()
-    if hum and tool and tool.Parent ~= char then
-        pcall(function() hum:EquipTool(tool) end)
-    end
-end
-local function currentWeapon()
-    local char = player.Character
-    if char then
-        for _,item in ipairs(char:GetChildren()) do
-            if item:IsA("Tool") then return item.Name end
-        end
-    end
-    local best = getBestWeapon()
-    return best and best.Name or "Pistol"
-end
-local function getNextUpgrade()
-    local main = playerGui:FindFirstChild("MainGui")
-    local panel = main and main:FindFirstChild("ControlPanel2")
-    local nextUp = panel and panel:FindFirstChild("NextUpgrade")
-    local label = nextUp and nextUp:FindFirstChild("DescriptionLabel")
-    return label and label.Text or ""
-end
-
--- Shared sky platform and dodge position (one controller for all attacks)
-local function standingY() return home and home.Y + SKY_HEIGHT end
-local function platformY() return standingY() - 3.5 end
-local function createPlatform(name,x,z)
-    local p=Instance.new("Part")
-    p.Name=name
-    p.Size=Vector3.new(18,1,18)
-    p.Anchored=true
-    p.CanCollide=true
-    p.CanTouch=false
-    p.Transparency=1
-    p.Position=Vector3.new(x,platformY(),z)
-    p.Parent=workspace
-    return p
-end
-local function removeDodgePlatform()
-    if dodgePlatform then dodgePlatform:Destroy(); dodgePlatform=nil end
-end
-local function clearDodge()
-    dodgeTarget=nil
-    dodgeUntil=0
-    dodgeReason="None"
-    removeDodgePlatform()
-    table.clear(threats)
-end
-local function removePlatform()
-    if platform then platform:Destroy(); platform=nil end
-    clearDodge()
-end
-local function teleportTo(x,z)
-    local root=getRoot()
-    if root and home then root.CFrame=CFrame.new(x,standingY(),z) end
-end
-local function makePlatform()
-    removePlatform()
-    local root=getRoot()
-    if not root then return end
-    home=root.Position
-    platform=createPlatform("ZombieSkyPlatform",home.X,home.Z)
-    teleportTo(home.X,home.Z)
-end
-local function returnHome()
-    if home and skyOn then teleportTo(home.X,home.Z) end
-    clearDodge()
-end
-local function updateHeight()
-    if not home then return end
-    if platform then platform.Position=Vector3.new(home.X,platformY(),home.Z) end
-    if dodgePlatform and dodgeTarget then
-        dodgePlatform.Position=Vector3.new(dodgeTarget.X,platformY(),dodgeTarget.Z)
-    end
-    if skyOn then
-        local target=dodgeTarget or home
-        teleportTo(target.X,target.Z)
-    end
-end
-local function cleanThreats()
-    local now=os.clock()
-    for i=#threats,1,-1 do
-        if threats[i].expires <= now then table.remove(threats,i) end
-    end
-end
-local function registerThreat(pos, duration, radius)
-    cleanThreats()
-    table.insert(threats,{pos=pos,expires=os.clock()+duration,radius=radius})
-end
-local function safeCandidate(current, distance)
-    cleanThreats()
-    local dirs={
-        Vector3.new(1,0,0),Vector3.new(-1,0,0),
-        Vector3.new(0,0,1),Vector3.new(0,0,-1),
-        Vector3.new(1,0,1).Unit,Vector3.new(-1,0,1).Unit,
-        Vector3.new(1,0,-1).Unit,Vector3.new(-1,0,-1).Unit
-    }
-    local best,score=nil,-math.huge
-    for _,dir in ipairs(dirs) do
-        local pos=current+dir*distance
-        local nearest=math.huge
-        for _,threat in ipairs(threats) do
-            nearest=math.min(nearest,flat(pos-threat.pos).Magnitude-threat.radius)
-        end
-        if nearest>score then best=pos;score=nearest end
-    end
-    return best
-end
-local function startDodge(target,duration,reason)
-    if not running or not skyOn or not home or not platform then return end
-    duration=math.clamp(duration,0.5,8)
-    dodgeUntil=math.max(dodgeUntil,os.clock()+duration)
-    dodgeTarget=Vector3.new(target.X,standingY(),target.Z)
-    dodgeReason=reason
-    removeDodgePlatform()
-    dodgePlatform=createPlatform("ZombieTemporaryDodgePlatform",dodgeTarget.X,dodgeTarget.Z)
-    teleportTo(dodgeTarget.X,dodgeTarget.Z)
-    print("[AUTO DODGE]",reason,"Hold:",math.max(0,dodgeUntil-os.clock()))
-end
-
-local function handleRockPacket(packet)
-    if not running or not rockDodgeOn or not skyOn or type(packet)~="table" then return end
-    if type(packet[1])=="table" then
-        for _,entry in pairs(packet) do handleRockPacket(entry) end
-        return
-    end
-    local id=tonumber(packet[1])
-    local sx,sy,sz=tonumber(packet[2]),tonumber(packet[3]),tonumber(packet[4])
-    local tx,ty,tz=tonumber(packet[5]),tonumber(packet[6]),tonumber(packet[7])
-    local flight=tonumber(packet[8])
-    if not (sx and sy and sz and tx and ty and tz) then return end
-    local root=getRoot()
-    if not root or not home or not platform then return end
-    local startPos=Vector3.new(sx,sy,sz)
-    local targetPos=Vector3.new(tx,ty,tz)
-    local currentPos=dodgeTarget or root.Position
-    if flat(currentPos-targetPos).Magnitude>ROCK_RADIUS
-        or math.abs(currentPos.Y-targetPos.Y)>12 then return end
-    local incoming=direction(targetPos-startPos)
-    local right=Vector3.new(-incoming.Z,0,incoming.X)
-    local side=flat(currentPos-startPos):Dot(right)
-    local dodgeDir=right*(side>=0 and 1 or -1)
-    local duration=math.clamp((flight or 1.5)+ROCK_EXTRA_TIME,0.8,8)
-    registerThreat(targetPos,duration,ROCK_RADIUS)
-    local target=currentPos+dodgeDir*ROCK_DODGE_DISTANCE
-    -- Avoid moving into any still-active cannonball/rock impact point.
-    local safe=safeCandidate(currentPos,ROCK_DODGE_DISTANCE)
-    if safe and flat(safe-targetPos).Magnitude>flat(target-targetPos).Magnitude then target=safe end
-    rocksDodged+=1
-    startDodge(target,duration,"ROCK | Zombie "..tostring(id or "?"))
-end
-local rockRemote=zombieRemotes:WaitForChild("ZombieRockThrow")
-table.insert(connections,rockRemote.OnClientEvent:Connect(function(...)
-    local args=table.pack(...)
-    for i=1,args.n do handleRockPacket(args[i]) end
-end))
-
--- Shared ZombieShoot handler: PumpkinGuard and PirateGunner.
--- Packet: {ZombieId,StartX,StartY,StartZ,TargetX,TargetY,TargetZ,
---          TravelTime,ProjectileType,ExtraParameter,ZombieType}
-local function handleShotPacket(packet)
-    if not running or not skyOn or type(packet)~="table" then return end
-    if type(packet[1])=="table" then
-        for _,entry in pairs(packet) do handleShotPacket(entry) end
-        return
-    end
-    local projectile=tostring(packet[9] or "")
-    local enemy=tostring(packet[11] or "")
-    local isPumpkin=projectile=="PumpkinCannonball" or enemy=="PumpkinGuard"
-    local isPirate=projectile=="PirateProjectile" or enemy=="PirateGunner"
-    if not isPumpkin and not isPirate then return end
-    if isPumpkin and not pumpkinDodgeOn then return end
-    if isPirate and not pirateDodgeOn then return end
-
-    local tx,ty,tz=tonumber(packet[5]),tonumber(packet[6]),tonumber(packet[7])
-    local flight=tonumber(packet[8])
-    if not (tx and ty and tz and flight) then return end
-    if isPumpkin then pumpkinsDetected+=1 else piratesDetected+=1 end
-
-    local root=getRoot()
-    if not root or not home or not platform then return end
-    local impact=Vector3.new(tx,ty,tz)
-    local current=dodgeTarget or root.Position
-    local radius=isPumpkin and PUMPKIN_RADIUS or PIRATE_RADIUS
-    local distance=flat(current-impact).Magnitude
-    if distance>radius or math.abs(current.Y-impact.Y)>12 then return end
-
-    -- Pirate projectiles have been observed reaching the player in ~0.4s.
-    -- React on receipt, and hold beyond impact to avoid early return.
-    local extra=isPumpkin and PUMPKIN_EXTRA_TIME or PIRATE_EXTRA_TIME
-    local duration=math.clamp(flight+extra,0.8,8)
-    registerThreat(impact,duration,radius)
-    local destination=safeCandidate(current,isPumpkin and PUMPKIN_DISTANCE or PIRATE_DISTANCE)
-    if not destination then return end
-    if isPumpkin then pumpkinsDodged+=1 else piratesDodged+=1 end
-    startDodge(destination,duration,(isPumpkin and "PUMPKIN" or "PIRATE").." | "..tostring(packet[1] or "?"))
-end
-local shootRemote=zombieRemotes:WaitForChild("ZombieShoot")
-table.insert(connections,shootRemote.OnClientEvent:Connect(function(...)
-    local args=table.pack(...)
-    for i=1,args.n do handleShotPacket(args[i]) end
-end))
-
-local soulDodgeOn = true
-local function handleBossAbility(data)
-    if not running or not skyOn then return end
-    if type(data)~="table" or data.Phase~="Telegraph" then return end
-    local cast=data.Cast
-    if type(cast)~="table" then return end
-    local root=getRoot()
-    if not root or not home then return end
-    if data.AbilityId == "FlyingDutchmanSoulCannon" then
-        if not soulDodgeOn or not platform then return end
-        local current = dodgeTarget or root.Position
-        local radius = tonumber(cast.Radius) or 9
-        local duration = 1.5
-        if type(cast.RecoveryEndAt)=="number" and type(data.ServerTime)=="number" then
-            duration=math.max(duration,cast.RecoveryEndAt-data.ServerTime+0.4)
-        end
-        local targets = {}
-        if type(cast.TargetPositions)=="table" then
-            for _,v in pairs(cast.TargetPositions) do
-                local pos=getVector(v)
-                if pos then table.insert(targets,pos) end
-            end
-        end
-        if #targets==0 then
-            local pos=getVector(cast.FacingPosition)
-            if pos then table.insert(targets,pos) end
-        end
-        local danger=false
-        for _,pos in ipairs(targets) do
-            registerThreat(pos,duration,radius+4)
-            if flat(current-pos).Magnitude<=radius+4 then danger=true end
-        end
-        if danger then
-            local destination=safeCandidate(current,25)
-            if destination then
-                bossesDodged+=1
-                startDodge(destination,duration,"SOUL CANNON")
-            end
-        end
-        return
-    end
-    if not bossDodgeOn then return end
-    local origin=getVector(cast.Origin)
-    if not origin then return end
-    local ability=tostring(data.AbilityId or "Unknown")
-    local radius=tonumber(cast.Radius) or tonumber(cast.MaximumRadius)
-    if not radius then warn("[BOSS DODGE] Unknown shape:",ability);return end
-    local playerPos=dodgeTarget or root.Position
-    local distance=flat(playerPos-origin).Magnitude
-    if distance>radius+4 then return end
-    local dodgeDir=direction(playerPos-origin)
-    if ability=="BoxerBarrage" then
-        local facing=getVector(cast.FacingPosition)
-        if facing then
-            local forward=direction(facing-origin)
-            local right=Vector3.new(-forward.Z,0,forward.X)
-            local side=flat(playerPos-origin):Dot(right)
-            dodgeDir=right*(side>=0 and 1 or -1)
-        end
-    end
-    local travel=math.max(12,radius+8-distance)
-    local target=playerPos+dodgeDir*travel
-    local duration=2
-    if type(cast.RecoveryEndAt)=="number" and type(data.ServerTime)=="number" then
-        duration=math.max(0.5,cast.RecoveryEndAt-data.ServerTime+0.25)
-    end
-    registerThreat(origin,duration,radius)
-    bossesDodged+=1
-    startDodge(target,duration,"BOSS | "..ability)
-end
-local bossRemote=bossRemotes:WaitForChild("BossAbilityState")
-table.insert(connections,bossRemote.OnClientEvent:Connect(handleBossAbility))
-
--- GUI: V4 layout expanded for seventh toggle.
-local old=playerGui:FindFirstChild("ZombieAllInOneGUI")
-if old then old:Destroy() end
-local gui=Instance.new("ScreenGui")
-gui.Name="ZombieAllInOneGUI"
-gui.ResetOnSpawn=false
-gui.DisplayOrder=150
-gui.Parent=playerGui
-local frame=Instance.new("Frame")
-frame.Size=UDim2.fromOffset(290,805)
-frame.Position=UDim2.new(1,-300,0.12,0)
-frame.BackgroundColor3=Color3.fromRGB(25,25,30)
-frame.Active=true
-frame.Draggable=true
-frame.Parent=gui
-Instance.new("UICorner",frame).CornerRadius=UDim.new(0,10)
-local title=Instance.new("TextLabel")
-title.Size=UDim2.new(1,0,0,30)
-title.BackgroundTransparency=1
-title.Text="ZOMBIE ARENA | ALL IN ONE V17"
-title.TextColor3=Color3.new(1,1,1)
-title.Font=Enum.Font.GothamBold
-title.TextSize=14
-title.Parent=frame
-local function makeButton(y,label,getter,setter)
-    local button=Instance.new("TextButton")
-    button.Size=UDim2.new(1,-20,0,35)
-    button.Position=UDim2.fromOffset(10,y)
-    button.TextColor3=Color3.new(1,1,1)
-    button.Font=Enum.Font.GothamBold
-    button.TextSize=13
-    button.Parent=frame
-    Instance.new("UICorner",button).CornerRadius=UDim.new(0,7)
-    local function refresh()
-        local state=getter()
-        button.Text=label..": "..(state and "ON" or "OFF")
-        button.BackgroundColor3=state and Color3.fromRGB(35,145,75) or Color3.fromRGB(150,45,45)
-    end
-    table.insert(connections,button.MouseButton1Click:Connect(function()
-        setter(not getter());refresh()
-    end))
-    refresh()
-end
-local function makeAction(text,x,y,w,callback)
-    local b=Instance.new("TextButton")
-    b.Size=UDim2.fromOffset(w,32)
-    b.Position=UDim2.fromOffset(x,y)
-    b.BackgroundColor3=Color3.fromRGB(55,65,85)
-    b.TextColor3=Color3.new(1,1,1)
-    b.Font=Enum.Font.GothamBold
-    b.TextSize=13
-    b.Text=text
-    b.Parent=frame
-    Instance.new("UICorner",b).CornerRadius=UDim.new(0,7)
-    table.insert(connections,b.MouseButton1Click:Connect(callback))
-    return b
-end
-makeButton(35,"KILL AURA",function()return killOn end,function(v)killOn=v end)
-makeButton(75,"SKY TP",function()return skyOn end,function(v)
-    skyOn=v
-    if v then makePlatform() else removePlatform() end
-end)
-makeButton(115,"AUTO BUY",function()return buyOn end,function(v)buyOn=v end)
-makeButton(155,"AUTO EQUIP",function()return equipOn end,function(v)equipOn=v end)
-makeButton(195,"BOSS AUTO DODGE",function()return bossDodgeOn end,function(v)
-    bossDodgeOn=v
-    if not v and dodgeReason:find("BOSS",1,true) then returnHome() end
-end)
-makeButton(235,"ROCK AUTO DODGE",function()return rockDodgeOn end,function(v)
-    rockDodgeOn=v
-    if not v and dodgeReason:find("ROCK",1,true) then returnHome() end
-end)
-makeButton(275,"PUMPKIN CANNON DODGE",function()return pumpkinDodgeOn end,function(v)
-    pumpkinDodgeOn=v
-    if not v and dodgeReason:find("PUMPKIN",1,true) then returnHome() end
-end)
-makeButton(315,"PIRATE PROJECTILE DODGE",function()return pirateDodgeOn end,function(v)
-    pirateDodgeOn=v
-    if not v and dodgeReason:find("PIRATE",1,true) then returnHome() end
-end)
-local heightLabel=Instance.new("TextLabel")
-heightLabel.Size=UDim2.fromOffset(270,24)
-heightLabel.Position=UDim2.fromOffset(10,359)
-heightLabel.BackgroundTransparency=1
-heightLabel.TextColor3=Color3.new(1,1,1)
-heightLabel.Text="Sky Height: 30 studs"
-heightLabel.Parent=frame
-makeAction("-5",10,387,130,function()
-    SKY_HEIGHT=math.max(5,SKY_HEIGHT-5)
-    heightLabel.Text="Sky Height: "..SKY_HEIGHT.." studs"
-    updateHeight()
-end)
-makeAction("+5",150,387,130,function()
-    SKY_HEIGHT=math.min(150,SKY_HEIGHT+5)
-    heightLabel.Text="Sky Height: "..SKY_HEIGHT.." studs"
-    updateHeight()
-end)
-local status=Instance.new("TextLabel")
-status.Size=UDim2.fromOffset(270,94)
-status.Position=UDim2.fromOffset(10,425)
-status.BackgroundTransparency=1
-status.TextColor3=Color3.new(1,1,1)
-status.TextSize=12
-status.TextWrapped=true
-status.Text="Starting..."
-status.Parent=frame
-local releaseShoot
-local function stop()
-    if not running then return end
-    running=false
-    shootOn=false
-    soulDodgeOn=false
-    if releaseShoot then releaseShoot() end
-    killOn,skyOn,buyOn,equipOn=false,false,false,false
-    bossDodgeOn,rockDodgeOn,pumpkinDodgeOn,pirateDodgeOn=false,false,false,false
-    for _,connection in ipairs(connections) do
-        pcall(function()connection:Disconnect() end)
-    end
-    removePlatform()
-    if gui then gui:Destroy() end
-    _G.ZombieAllInOneStop=nil
-    _G.ZombieBossDodgeStop=nil
-    print("Zombie Arena V17 stopped.")
-end
-_G.ZombieAllInOneStop=stop
-_G.ZombieBossDodgeStop=stop
-local macroOn, resetSent, sawResults = true, false, false
-local configFile = "ZombieArena_TargetWave.txt"
-local targetWave = 30
-local waveLocked = false
-if type(readfile)=="function" then
-    local ok, saved = pcall(readfile, configFile)
-    local n = ok and tonumber(saved)
-    if n and n >= 1 and n <= 1000000 then
-        targetWave = math.floor(n)
-        waveLocked = true
-    end
-end
-local macroStatus = "Waiting for wave "..targetWave
-local lastReplay = -math.huge
-local VIM = game:GetService("VirtualInputManager")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 local GuiService = game:GetService("GuiService")
-makeButton(525,"WAVE RESET + REPLAY",function() return macroOn end,function(v)
-    macroOn=v
-    resetSent=false
-    sawResults=false
-end)
-local waveBox=Instance.new("TextBox")
-waveBox.Size=UDim2.fromOffset(125,30)
-waveBox.Position=UDim2.fromOffset(10,565)
-waveBox.BackgroundColor3=Color3.fromRGB(45,45,50)
-waveBox.TextColor3=Color3.new(1,1,1)
-waveBox.Text=tostring(targetWave)
-waveBox.TextEditable=not waveLocked
-waveBox.PlaceholderText="Target wave"
-waveBox.ClearTextOnFocus=false
-waveBox.Parent=frame
-Instance.new("UICorner",waveBox)
-local lockButton
-lockButton=makeAction(waveLocked and "UNLOCK" or "LOCK + SAVE",145,565,135,function()
-    if waveLocked then
-        waveLocked=false
-        waveBox.TextEditable=true
-        lockButton.Text="LOCK + SAVE"
-        return
-    end
-    local n=tonumber(waveBox.Text)
-    if not n or n<1 or n>1000000 or n~=math.floor(n) then
-        waveBox.Text=tostring(targetWave)
-        lockButton.Text="INVALID WAVE"
-        return
-    end
-    targetWave=n
-    waveBox.Text=tostring(n)
-    waveLocked=true
-    waveBox.TextEditable=false
-    local saved=false
-    if type(writefile)=="function" then
-        saved=pcall(writefile,configFile,tostring(n))
-    end
-    lockButton.Text=saved and "UNLOCK (SAVED)" or "UNLOCK (TEMP)"
-end)
-local macroLabel=Instance.new("TextLabel")
-macroLabel.Size=UDim2.fromOffset(270,38)
-macroLabel.Position=UDim2.fromOffset(10,598)
-macroLabel.BackgroundTransparency=1
-macroLabel.TextColor3=Color3.new(1,1,1)
-macroLabel.TextWrapped=true
-macroLabel.TextSize=12
-macroLabel.Parent=frame
-makeButton(640,"AUTO SHOOT",function() return shootOn end,function(v) shootOn=v end)
-makeButton(680,"SOUL CANNON AUTO DODGE",function() return soulDodgeOn end,function(v) soulDodgeOn=v end)
-makeButton(720,"AUTO CHEST",function() return chestOn end,function(v) chestOn=v end)
-makeAction("REMOVE SCRIPT",10,763,270,stop)
 
-local function visible(obj)
-    while obj and obj~=playerGui do
-        if obj:IsA("GuiObject") and not obj.Visible then return false end
-        if obj:IsA("ScreenGui") and not obj.Enabled then return false end
-        obj=obj.Parent
-    end
-    return obj==playerGui
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+local GunHitRemote = Remotes:WaitForChild("GunRemotes"):WaitForChild("GunHit")
+local UpgradeRemotes = Remotes:WaitForChild("UpgradeRemotes")
+local PurchaseWeaponRemote = UpgradeRemotes:WaitForChild("PurchaseWeaponUpgrade")
+local PurchaseHealthRemote = UpgradeRemotes:WaitForChild("PurchaseHealthUpgrade")
+local ZombieRemotes = Remotes:WaitForChild("ZombieRemotes")
+local RockThrowRemote = ZombieRemotes:WaitForChild("ZombieRockThrow")
+local ZombieShootRemote = ZombieRemotes:WaitForChild("ZombieShoot")
+local BossAbilityRemote = Remotes:WaitForChild("BossRemotes"):WaitForChild("BossAbilityState")
+local ZombieFolder = workspace:WaitForChild("Zombies_Local")
+--// 2. Constants & Runtime State \\--
+local WEAPON_PRIORITY = {
+	"Star Shooter",
+	"SCAR-H",
+	"P90",
+	"Pistol",
+	"ShotGun",
+	"Rifle",
+	"Minigun",
+}
+
+local CARDINAL_DIRECTIONS = {
+	Vector3.new(1, 0, 0),
+	Vector3.new(-1, 0, 0),
+	Vector3.new(0, 0, 1),
+	Vector3.new(0, 0, -1),
+	Vector3.new(1, 0, 1).Unit,
+	Vector3.new(-1, 0, 1).Unit,
+	Vector3.new(1, 0, -1).Unit,
+	Vector3.new(-1, 0, -1).Unit,
+}
+
+local DODGE_TIMING = {
+	RockExtra = 0.6,
+	PumpkinExtra = 1.1,
+	PirateExtra = 0.9,
+	VerticalTolerance = 12,
+	PlatformOffset = 3.5,
+}
+
+local State = {
+	Running = true,
+	Connections = {},
+
+	-- Sky & Dodge
+	Home = nil,
+	MainPlatform = nil,
+	DodgePlatform = nil,
+	DodgeTarget = nil,
+	DodgeUntil = 0,
+	DodgeReason = "None",
+	Threats = {},
+
+	-- Auto Shoot
+	MouseHeld = false,
+	ShotX = 0,
+	ShotY = 0,
+
+	-- Auto Chest
+	ChestBusy = false,
+
+	-- Auto Buy
+	HealthUnlocked = false,
+	LastUpgrade = "Waiting...",
+
+	-- Wave Macro
+	TargetWave = 30,
+	ResetSent = false,
+	SawResults = false,
+	LastReplayTime = -math.huge,
+	MacroStatus = "Waiting for wave 30",
+
+	-- Telemetry
+	Stats = {
+		RocksDodged = 0,
+		BossesDodged = 0,
+		PumpkinsDodged = 0,
+		PumpkinsDetected = 0,
+		PiratesDodged = 0,
+		PiratesDetected = 0,
+	},
+}
+
+--// 3. Load Ouroidian UI Library \\--
+local Repo = "https://raw.githubusercontent.com/joustingmatch/Ouroidian/main/"
+local Library = loadstring(game:HttpGet(Repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(Repo .. "addons/ThemeManager.lua"))()
+local SaveManager = loadstring(game:HttpGet(Repo .. "addons/SaveManager.lua"))()
+
+local Options = Library.Options
+local Toggles = Library.Toggles
+
+Library.ForceCheckbox = false
+Library.ShowToggleFrameInKeybinds = true
+
+--// 4. Utility Helpers \\--
+local function trackConnection(conn)
+	table.insert(State.Connections, conn)
+	return conn
 end
--- Repeat the verified five-second mouse hold.
-local held, shotX, shotY = false, 0, 0
-releaseShoot = function()
-    if not held then return end
-    local ok, err = pcall(function()
-        VIM:SendMouseButtonEvent(shotX,shotY,0,false,game,0)
-    end)
-    if ok then held=false else warn("Auto Shoot release:",err) end
+
+local function normalizeName(str)
+	return tostring(str):upper():gsub("[^%w]", "")
 end
-local function canShoot()
-    local over=playerGui:FindFirstChild("GameOver")
-    local canvas=over and over:FindFirstChild("ResultsCanvas")
-    local stack=canvas and canvas:FindFirstChild("ContentStack")
-    local replay=stack and stack:FindFirstChild("PlayAgain")
-    local char=player.Character
-    local hum=char and char:FindFirstChildOfClass("Humanoid")
-    return running and shootOn and not chestBusy and not (chestOn and chestPrompt()) and hum and hum.Health>0
-        and not resetSent and not (replay and visible(replay))
-        and not game:GetService("UserInputService"):GetFocusedTextBox()
+
+local function getCharacterParts()
+	local character = LocalPlayer.Character
+	if not character then
+		return nil, nil, nil
+	end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local root = character:FindFirstChild("HumanoidRootPart")
+	return character, humanoid, root
 end
-task.spawn(function()
-    while running do
-        if canShoot() and workspace.CurrentCamera and not held then
-            local center=workspace.CurrentCamera.ViewportSize / 2
-            shotX,shotY=center.X,center.Y
-            local ok,err=pcall(function()
-                VIM:SendMouseButtonEvent(shotX,shotY,0,true,game,0)
-            end)
-            if ok then
-                held=true
-                local deadline=os.clock()+5
-                repeat task.wait(0.05) until not held or not canShoot() or os.clock()>=deadline
-                releaseShoot()
-            else
-                warn("Auto Shoot:",err)
-                if setclipboard then pcall(setclipboard,tostring(err)) end
-                task.wait(2)
-            end
-        elseif held then
-            releaseShoot()
-        end
-        task.wait(0.1)
-    end
-    releaseShoot()
+
+local function getRoot()
+	local character = LocalPlayer.Character
+	return character and character:FindFirstChild("HumanoidRootPart")
+end
+
+local function flattenVector(v)
+	return Vector3.new(v.X, 0, v.Z)
+end
+
+local function flatDirection(v)
+	local f = flattenVector(v)
+	return f.Magnitude < 0.01 and Vector3.new(1, 0, 0) or f.Unit
+end
+
+local function parseVector3(value)
+	if typeof(value) == "Vector3" then
+		return value
+	end
+	if type(value) == "table" then
+		local x = value.X or value.x or value[1]
+		local y = value.Y or value.y or value[2]
+		local z = value.Z or value.z or value[3]
+		if type(x) == "number" and type(y) == "number" and type(z) == "number" then
+			return Vector3.new(x, y, z)
+		end
+	end
+	return nil
+end
+
+local function isGuiVisible(obj)
+	while obj and obj ~= PlayerGui do
+		if obj:IsA("GuiObject") and not obj.Visible then
+			return false
+		end
+		if obj:IsA("ScreenGui") and not obj.Enabled then
+			return false
+		end
+		obj = obj.Parent
+	end
+	return obj == PlayerGui
+end
+
+local function getPlayAgainButton()
+	local gameOver = PlayerGui:FindFirstChild("GameOver")
+	local canvas = gameOver and gameOver:FindFirstChild("ResultsCanvas")
+	local stack = canvas and canvas:FindFirstChild("ContentStack")
+	return stack and stack:FindFirstChild("PlayAgain")
+end
+
+local function findActiveChestPrompt()
+	local folder = workspace:FindFirstChild("RaidChests")
+	if not folder then
+		return nil, nil
+	end
+
+	local function extractFromChest(chest)
+		local part = chest and chest:FindFirstChild("Part")
+		local prompt = part and part:FindFirstChild("RaidChestOpen")
+		if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled and part:IsA("BasePart") then
+			return prompt, part
+		end
+		return nil, nil
+	end
+
+	local prompt, part = extractFromChest(folder:FindFirstChild("RaidChest"))
+	if prompt then
+		return prompt, part
+	end
+
+	for _, child in ipairs(folder:GetChildren()) do
+		prompt, part = extractFromChest(child)
+		if prompt then
+			return prompt, part
+		end
+	end
+
+	return nil, nil
+end
+
+--// 5. Weapon System \\--
+local Weapons = {}
+
+function Weapons.GetAllTools()
+	local tools = {}
+	for _, container in ipairs({ LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack") }) do
+		if container then
+			for _, item in ipairs(container:GetChildren()) do
+				if item:IsA("Tool") then
+					table.insert(tools, item)
+				end
+			end
+		end
+	end
+	return tools
+end
+
+function Weapons.Owns(weaponName)
+	local target = normalizeName(weaponName)
+	for _, tool in ipairs(Weapons.GetAllTools()) do
+		if normalizeName(tool.Name) == target then
+			return true
+		end
+	end
+	return false
+end
+
+function Weapons.GetBest()
+	local tools = Weapons.GetAllTools()
+	if #tools == 0 then
+		return nil
+	end
+
+	local byNormalized = {}
+	for _, tool in ipairs(tools) do
+		byNormalized[normalizeName(tool.Name)] = tool
+	end
+
+	for _, priorityName in ipairs(WEAPON_PRIORITY) do
+		local match = byNormalized[normalizeName(priorityName)]
+		if match then
+			return match
+		end
+	end
+
+	return tools[1]
+end
+
+function Weapons.EquipBest()
+	local character, humanoid = getCharacterParts()
+	if not character or not humanoid or humanoid.Health <= 0 then
+		return false
+	end
+
+	local best = Weapons.GetBest()
+	if best and best.Parent ~= character then
+		pcall(function()
+			humanoid:EquipTool(best)
+		end)
+		return true
+	end
+	return false
+end
+
+function Weapons.GetEquippedName()
+	local character = LocalPlayer.Character
+	if character then
+		for _, item in ipairs(character:GetChildren()) do
+			if item:IsA("Tool") then
+				return item.Name
+			end
+		end
+	end
+	local best = Weapons.GetBest()
+	return best and best.Name or "Pistol"
+end
+
+--// 6. Sky Platform & Dodge Controller \\--
+local Platform = {}
+
+local function getSkyHeight()
+	return Options.SkyHeight and Options.SkyHeight.Value or 30
+end
+
+function Platform.GetStandingY()
+	if not State.Home then
+		return nil
+	end
+	return State.Home.Y + getSkyHeight()
+end
+
+function Platform.GetPlatformY()
+	local standingY = Platform.GetStandingY()
+	return standingY and (standingY - DODGE_TIMING.PlatformOffset) or nil
+end
+
+local function createSupportPart(name, x, z)
+	local y = Platform.GetPlatformY()
+	if not y then
+		return nil
+	end
+
+	local part = Instance.new("Part")
+	part.Name = name
+	part.Size = Vector3.new(18, 1, 18)
+	part.Anchored = true
+	part.CanCollide = true
+	part.CanTouch = false
+	part.Transparency = 1
+	part.Position = Vector3.new(x, y, z)
+	part.Parent = workspace
+	return part
+end
+
+function Platform.TeleportTo(x, z)
+	local root = getRoot()
+	local y = Platform.GetStandingY()
+	if root and y then
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.CFrame = CFrame.new(x, y, z)
+	end
+end
+
+function Platform.DestroyDodgePlatform()
+	if State.DodgePlatform then
+		State.DodgePlatform:Destroy()
+		State.DodgePlatform = nil
+	end
+end
+
+function Platform.ClearDodge()
+	State.DodgeTarget = nil
+	State.DodgeUntil = 0
+	State.DodgeReason = "None"
+	Platform.DestroyDodgePlatform()
+	table.clear(State.Threats)
+end
+
+function Platform.DestroyAll()
+	if State.MainPlatform then
+		State.MainPlatform:Destroy()
+		State.MainPlatform = nil
+	end
+	Platform.ClearDodge()
+end
+
+function Platform.Build(customHome)
+	Platform.DestroyAll()
+	local root = getRoot()
+	if not root and not customHome then
+		return
+	end
+
+	State.Home = customHome or root.Position
+	State.MainPlatform = createSupportPart("ZombieSkyPlatform", State.Home.X, State.Home.Z)
+	Platform.TeleportTo(State.Home.X, State.Home.Z)
+end
+
+function Platform.ReturnHome()
+	if State.Home and Toggles.SkyTP and Toggles.SkyTP.Value then
+		Platform.TeleportTo(State.Home.X, State.Home.Z)
+	end
+	Platform.ClearDodge()
+end
+
+function Platform.UpdateHeight()
+	if not State.Home then
+		return
+	end
+
+	local platY = Platform.GetPlatformY()
+	if not platY then
+		return
+	end
+
+	if State.MainPlatform then
+		State.MainPlatform.Position = Vector3.new(State.Home.X, platY, State.Home.Z)
+	end
+	if State.DodgePlatform and State.DodgeTarget then
+		State.DodgePlatform.Position = Vector3.new(State.DodgeTarget.X, platY, State.DodgeTarget.Z)
+	end
+	if Toggles.SkyTP and Toggles.SkyTP.Value then
+		local activeTarget = State.DodgeTarget or State.Home
+		Platform.TeleportTo(activeTarget.X, activeTarget.Z)
+	end
+end
+
+local Dodge = {}
+
+function Dodge.PruneThreats()
+	local now = os.clock()
+	for i = #State.Threats, 1, -1 do
+		if State.Threats[i].Expires <= now then
+			table.remove(State.Threats, i)
+		end
+	end
+end
+
+function Dodge.RegisterThreat(position, duration, radius)
+	Dodge.PruneThreats()
+	table.insert(State.Threats, {
+		Pos = position,
+		Expires = os.clock() + duration,
+		Radius = radius,
+	})
+end
+
+function Dodge.IsPositionSafe(position)
+	Dodge.PruneThreats()
+	for _, threat in ipairs(State.Threats) do
+		if flattenVector(position - threat.Pos).Magnitude <= threat.Radius then
+			return false
+		end
+	end
+	return true
+end
+
+function Dodge.FindSafeCandidate(origin, distance)
+	Dodge.PruneThreats()
+	local bestPos, bestScore = nil, -math.huge
+
+	for _, dir in ipairs(CARDINAL_DIRECTIONS) do
+		local candidate = origin + dir * distance
+		local minClearance = math.huge
+		for _, threat in ipairs(State.Threats) do
+			local clearance = flattenVector(candidate - threat.Pos).Magnitude - threat.Radius
+			if clearance < minClearance then
+				minClearance = clearance
+			end
+		end
+		if minClearance > bestScore then
+			bestScore = minClearance
+			bestPos = candidate
+		end
+	end
+
+	return bestPos
+end
+
+function Dodge.Start(targetPos, duration, reason)
+	if not State.Running or not Toggles.SkyTP.Value or not State.Home or not State.MainPlatform then
+		return
+	end
+
+	local standingY = Platform.GetStandingY()
+	if not standingY then
+		return
+	end
+
+	duration = math.clamp(duration, 0.5, 8)
+	State.DodgeUntil = math.max(State.DodgeUntil, os.clock() + duration)
+	State.DodgeTarget = Vector3.new(targetPos.X, standingY, targetPos.Z)
+	State.DodgeReason = reason
+
+	Platform.DestroyDodgePlatform()
+	State.DodgePlatform = createSupportPart("ZombieTemporaryDodgePlatform", State.DodgeTarget.X, State.DodgeTarget.Z)
+	Platform.TeleportTo(State.DodgeTarget.X, State.DodgeTarget.Z)
+end
+
+--// 7. Auto Shoot Helpers \\--
+local AutoShoot = {}
+
+function AutoShoot.Release()
+	if not State.MouseHeld then
+		return true
+	end
+	local ok, err = pcall(function()
+		VirtualInputManager:SendMouseButtonEvent(State.ShotX, State.ShotY, 0, false, game, 0)
+	end)
+	if ok then
+		State.MouseHeld = false
+		return true
+	end
+	warn("[ZombieArena] Auto Shoot release failed:", err)
+	return false
+end
+
+function AutoShoot.CanFire()
+	if not State.Running or Library.Unloaded or not Toggles.AutoShoot.Value then
+		return false
+	end
+	if State.ChestBusy or (Toggles.AutoChest.Value and findActiveChestPrompt()) then
+		return false
+	end
+	if State.ResetSent or UserInputService:GetFocusedTextBox() then
+		return false
+	end
+
+	local _, humanoid = getCharacterParts()
+	if not humanoid or humanoid.Health <= 0 then
+		return false
+	end
+
+	local replayBtn = getPlayAgainButton()
+	if replayBtn and isGuiVisible(replayBtn) then
+		return false
+	end
+
+	return true
+end
+
+--// 8. Projectile & Boss Packet Handlers \\--
+local function handleRockPacket(packet)
+	if not State.Running or not Toggles.RockDodge.Value or not Toggles.SkyTP.Value or type(packet) ~= "table" then
+		return
+	end
+	if type(packet[1]) == "table" then
+		for _, entry in pairs(packet) do
+			handleRockPacket(entry)
+		end
+		return
+	end
+
+	local id = tonumber(packet[1])
+	local sx, sy, sz = tonumber(packet[2]), tonumber(packet[3]), tonumber(packet[4])
+	local tx, ty, tz = tonumber(packet[5]), tonumber(packet[6]), tonumber(packet[7])
+	local flight = tonumber(packet[8])
+	if not (sx and sy and sz and tx and ty and tz) then
+		return
+	end
+
+	local root = getRoot()
+	if not root or not State.Home or not State.MainPlatform then
+		return
+	end
+
+	local startPos = Vector3.new(sx, sy, sz)
+	local targetPos = Vector3.new(tx, ty, tz)
+	local currentPos = State.DodgeTarget or root.Position
+
+	local rockRadius = Options.RockRadius.Value
+	local rockDist = Options.RockDistance.Value
+
+	if flattenVector(currentPos - targetPos).Magnitude > rockRadius
+		or math.abs(currentPos.Y - targetPos.Y) > DODGE_TIMING.VerticalTolerance
+	then
+		return
+	end
+
+	local incoming = flatDirection(targetPos - startPos)
+	local right = Vector3.new(-incoming.Z, 0, incoming.X)
+	local side = flattenVector(currentPos - startPos):Dot(right)
+	local dodgeDir = right * (side >= 0 and 1 or -1)
+
+	local duration = math.clamp((flight or 1.5) + DODGE_TIMING.RockExtra, 0.8, 8)
+	Dodge.RegisterThreat(targetPos, duration, rockRadius)
+
+	local destination = currentPos + dodgeDir * rockDist
+	local safePos = Dodge.FindSafeCandidate(currentPos, rockDist)
+	if safePos and flattenVector(safePos - targetPos).Magnitude > flattenVector(destination - targetPos).Magnitude then
+		destination = safePos
+	end
+
+	State.Stats.RocksDodged += 1
+	Dodge.Start(destination, duration, "ROCK | Zombie " .. tostring(id or "?"))
+end
+
+-- Packet: { ZombieId, StartX, StartY, StartZ, TargetX, TargetY, TargetZ, TravelTime, ProjectileType, ExtraParam, ZombieType }
+local function handleShotPacket(packet)
+	if not State.Running or not Toggles.SkyTP.Value or type(packet) ~= "table" then
+		return
+	end
+	if type(packet[1]) == "table" then
+		for _, entry in pairs(packet) do
+			handleShotPacket(entry)
+		end
+		return
+	end
+
+	local projectile = tostring(packet[9] or "")
+	local enemy = tostring(packet[11] or "")
+	local isPumpkin = projectile == "PumpkinCannonball" or enemy == "PumpkinGuard"
+	local isPirate = projectile == "PirateProjectile" or enemy == "PirateGunner"
+
+	if not isPumpkin and not isPirate then
+		return
+	end
+	if isPumpkin and not Toggles.PumpkinDodge.Value then
+		return
+	end
+	if isPirate and not Toggles.PirateDodge.Value then
+		return
+	end
+
+	local tx, ty, tz = tonumber(packet[5]), tonumber(packet[6]), tonumber(packet[7])
+	local flight = tonumber(packet[8])
+	if not (tx and ty and tz and flight) then
+		return
+	end
+
+	if isPumpkin then
+		State.Stats.PumpkinsDetected += 1
+	else
+		State.Stats.PiratesDetected += 1
+	end
+
+	local root = getRoot()
+	if not root or not State.Home or not State.MainPlatform then
+		return
+	end
+
+	local impact = Vector3.new(tx, ty, tz)
+	local currentPos = State.DodgeTarget or root.Position
+	local radius = isPumpkin and Options.PumpkinRadius.Value or Options.PirateRadius.Value
+
+	if flattenVector(currentPos - impact).Magnitude > radius
+		or math.abs(currentPos.Y - impact.Y) > DODGE_TIMING.VerticalTolerance
+	then
+		return
+	end
+
+	local extra = isPumpkin and DODGE_TIMING.PumpkinExtra or DODGE_TIMING.PirateExtra
+	local distance = isPumpkin and Options.PumpkinDistance.Value or Options.PirateDistance.Value
+	local duration = math.clamp(flight + extra, 0.8, 8)
+
+	Dodge.RegisterThreat(impact, duration, radius)
+	local destination = Dodge.FindSafeCandidate(currentPos, distance)
+	if not destination then
+		return
+	end
+
+	if isPumpkin then
+		State.Stats.PumpkinsDodged += 1
+	else
+		State.Stats.PiratesDodged += 1
+	end
+
+	local label = isPumpkin and "PUMPKIN" or "PIRATE"
+	Dodge.Start(destination, duration, label .. " | " .. tostring(packet[1] or "?"))
+end
+
+local function handleBossAbility(data)
+	if not State.Running or not Toggles.SkyTP.Value or not State.Home or not State.MainPlatform then
+		return
+	end
+	if type(data) ~= "table" or data.Phase ~= "Telegraph" then
+		return
+	end
+
+	local cast = data.Cast
+	local root = getRoot()
+	if type(cast) ~= "table" or not root then
+		return
+	end
+
+	local currentPos = State.DodgeTarget or root.Position
+
+	-- Flying Dutchman Soul Cannon (multi-target AoE)
+	if data.AbilityId == "FlyingDutchmanSoulCannon" then
+		if not Toggles.SoulDodge.Value then
+			return
+		end
+
+		local radius = tonumber(cast.Radius) or 9
+		local duration = 1.5
+		if type(cast.RecoveryEndAt) == "number" and type(data.ServerTime) == "number" then
+			duration = math.max(duration, cast.RecoveryEndAt - data.ServerTime + 0.4)
+		end
+
+		local targets = {}
+		if type(cast.TargetPositions) == "table" then
+			for _, raw in pairs(cast.TargetPositions) do
+				local pos = parseVector3(raw)
+				if pos then
+					table.insert(targets, pos)
+				end
+			end
+		end
+		if #targets == 0 then
+			local facing = parseVector3(cast.FacingPosition)
+			if facing then
+				table.insert(targets, facing)
+			end
+		end
+
+		local inDanger = false
+		for _, pos in ipairs(targets) do
+			Dodge.RegisterThreat(pos, duration, radius + 4)
+			if flattenVector(currentPos - pos).Magnitude <= radius + 4 then
+				inDanger = true
+			end
+		end
+
+		if inDanger then
+			local destination = Dodge.FindSafeCandidate(currentPos, 25)
+			if destination then
+				State.Stats.BossesDodged += 1
+				Dodge.Start(destination, duration, "SOUL CANNON")
+			end
+		end
+		return
+	end
+
+	-- Standard Boss Telegraphs
+	if not Toggles.BossDodge.Value then
+		return
+	end
+
+	local origin = parseVector3(cast.Origin)
+	if not origin then
+		return
+	end
+
+	local ability = tostring(data.AbilityId or "Unknown")
+	local radius = tonumber(cast.Radius) or tonumber(cast.MaximumRadius)
+	if not radius then
+		warn("[ZombieArena] Unknown boss ability shape:", ability)
+		return
+	end
+
+	local distToOrigin = flattenVector(currentPos - origin).Magnitude
+	if distToOrigin > radius + 4 then
+		return
+	end
+
+	local dodgeDir = flatDirection(currentPos - origin)
+	if ability == "BoxerBarrage" then
+		local facing = parseVector3(cast.FacingPosition)
+		if facing then
+			local forward = flatDirection(facing - origin)
+			local right = Vector3.new(-forward.Z, 0, forward.X)
+			local side = flattenVector(currentPos - origin):Dot(right)
+			dodgeDir = right * (side >= 0 and 1 or -1)
+		end
+	end
+
+	local travel = math.max(12, radius + 8 - distToOrigin)
+	local duration = 2
+	if type(cast.RecoveryEndAt) == "number" and type(data.ServerTime) == "number" then
+		duration = math.max(0.5, cast.RecoveryEndAt - data.ServerTime + 0.25)
+	end
+
+	Dodge.RegisterThreat(origin, duration, radius)
+
+	local destination = currentPos + dodgeDir * travel
+	if not Dodge.IsPositionSafe(destination) then
+		local safer = Dodge.FindSafeCandidate(currentPos, travel)
+		if safer then
+			destination = safer
+		end
+	end
+
+	State.Stats.BossesDodged += 1
+	Dodge.Start(destination, duration, "BOSS | " .. ability)
+end
+
+--// 9. Build Ouroidian Interface \\--
+local Window = Library:CreateWindow({
+	Title = "Zombie Arena",
+	Subtitle = "All-In-One",
+	Footer = "v18.0  ·  Ouroidian",
+	NotifySide = "Right",
+	Center = true,
+	AutoShow = true,
+	TabButtonsStyle = {
+		Gap = 4,
+		Padding = 6,
+		CornerRadius = 6,
+		Indicator = true,
+		IndicatorWidth = 2,
+		IndicatorHeight = 26,
+	},
+})
+
+local Tabs = {
+	Combat = Window:AddTab({ Name = "Combat", Icon = "swords", Description = "Kill aura, auto shoot and loadout" }),
+	Defense = Window:AddTab({ Name = "Defense", Icon = "shield", Description = "Sky platform and projectile dodge" }),
+	Automation = Window:AddTab({ Name = "Automation", Icon = "bot", Description = "Upgrades, chests and wave farming" }),
+	Settings = Window:AddTab({ Name = "Settings", Icon = "settings", Description = "Menu, themes and configs" }),
+}
+
+-- [Tab: Combat]
+local OffenseGroup = Tabs.Combat:AddGroupbox({
+	Side = "Left",
+	Name = "Offense",
+	Description = "Automated zombie targeting and firing",
+	IconName = "crosshair",
+})
+
+local KillAuraToggle = OffenseGroup:AddToggle("KillAura", {
+	Text = "Kill Aura",
+	Tooltip = "Fires GunHit across nearby zombies in Zombies_Local",
+	Default = true,
+})
+
+local KillAuraSettings = KillAuraToggle:AddSettingsPopup({ Width = 230, Tooltip = "Kill Aura parameters" })
+
+KillAuraSettings:AddSlider("AttackInterval", {
+	Text = "Attack Interval",
+	Default = 0.15,
+	Min = 0.05,
+	Max = 1.0,
+	Rounding = 2,
+	Suffix = "s",
+})
+
+KillAuraSettings:AddSlider("MaxHits", {
+	Text = "Max Hits / Cycle",
+	Default = 20,
+	Min = 1,
+	Max = 50,
+	Rounding = 0,
+})
+
+local AutoShootToggle = OffenseGroup:AddToggle("AutoShoot", {
+	Text = "Auto Shoot",
+	Tooltip = "Holds primary fire at viewport center while alive",
+	Default = true,
+})
+
+local ShootSettings = AutoShootToggle:AddSettingsPopup({ Width = 220, Tooltip = "Auto Shoot timing" })
+
+ShootSettings:AddSlider("ShootHoldTime", {
+	Text = "Hold Duration",
+	Default = 5,
+	Min = 1,
+	Max = 15,
+	Rounding = 1,
+	Suffix = "s",
+})
+
+OffenseGroup:AddDivider("Loadout")
+
+OffenseGroup:AddToggle("AutoEquip", {
+	Text = "Auto Equip Best Weapon",
+	Tooltip = "Keeps the highest-priority unlocked weapon equipped",
+	Default = true,
+})
+
+OffenseGroup:AddButton({
+	Text = "Equip Best Now",
+	Func = function()
+		if Weapons.EquipBest() then
+			Library:Notify({ Title = "Loadout", Description = "Equipped " .. Weapons.GetEquippedName(), Time = 2 })
+		else
+			Library:Notify({ Title = "Loadout", Description = "Best weapon is already equipped.", Time = 2 })
+		end
+	end,
+})
+
+local CombatInfoGroup = Tabs.Combat:AddGroupbox({
+	Side = "Right",
+	Name = "Live Telemetry",
+	IconName = "activity",
+})
+
+CombatInfoGroup:AddLabel("CombatStatusLabel", {
+	Text = "Initializing...",
+	DoesWrap = true,
+})
+
+CombatInfoGroup:AddDivider()
+
+CombatInfoGroup:AddLabel("DodgeStatsLabel", {
+	Text = "Rock: 0 | Boss: 0\nPumpkin: 0/0 | Pirate: 0/0",
+	DoesWrap = true,
+})
+
+CombatInfoGroup:AddButton({
+	Text = "Reset Counters",
+	Func = function()
+		for k in pairs(State.Stats) do
+			State.Stats[k] = 0
+		end
+		Library:Notify({ Title = "Telemetry", Description = "Dodge counters cleared.", Time = 2 })
+	end,
+})
+
+-- [Tab: Defense]
+local SkyGroup = Tabs.Defense:AddGroupbox({
+	Side = "Left",
+	Name = "Sky Platform",
+	Description = "Elevated anchor used by all auto-dodge handlers",
+	IconName = "cloud",
+})
+
+SkyGroup:AddToggle("SkyTP", {
+	Text = "Enable Sky TP",
+	Tooltip = "Creates an invisible platform above your position",
+	Default = true,
+})
+
+local SkyDeps = SkyGroup:AddDependencyBox()
+
+SkyDeps:AddSlider("SkyHeight", {
+	Text = "Sky Height",
+	Default = 30,
+	Min = 5,
+	Max = 150,
+	Rounding = 0,
+	Suffix = " studs",
+})
+
+SkyDeps:AddButton({
+	Text = "Set Home Here",
+	Tooltip = "Rebuilds the sky platform above your current position",
+	Func = function()
+		Platform.Build()
+		Library:Notify({ Title = "Sky TP", Description = "Re-anchored sky platform.", Time = 2 })
+	end,
+}):AddButton({
+	Text = "Return Home",
+	Tooltip = "Clears active dodge and returns to Home",
+	Func = function()
+		Platform.ReturnHome()
+	end,
+})
+
+SkyDeps:SetupDependencies({
+	{ Toggles.SkyTP, true },
+})
+
+local DodgeGroup = Tabs.Defense:AddGroupbox({
+	Side = "Right",
+	Name = "Auto Dodge",
+	Description = "Requires Sky TP to be enabled",
+	IconName = "shield",
+})
+
+DodgeGroup:AddToggle("BossDodge", {
+	Text = "Boss Abilities",
+	Tooltip = "Evades telegraphed boss AoEs and Boxer Barrage",
+	Default = true,
+})
+
+DodgeGroup:AddToggle("SoulDodge", {
+	Text = "Soul Cannon (Flying Dutchman)",
+	Tooltip = "Evades multi-target FlyingDutchmanSoulCannon strikes",
+	Default = true,
+})
+
+DodgeGroup:AddDivider("Projectiles")
+
+local RockToggle = DodgeGroup:AddToggle("RockDodge", {
+	Text = "Zombie Rock Throw",
+	Default = true,
+})
+local RockPopup = RockToggle:AddSettingsPopup({ Width = 220, Tooltip = "Rock dodge settings" })
+RockPopup:AddSlider("RockRadius", { Text = "Danger Radius", Default = 9, Min = 4, Max = 25, Rounding = 0, Suffix = " studs" })
+RockPopup:AddSlider("RockDistance", { Text = "Dodge Distance", Default = 28, Min = 10, Max = 60, Rounding = 0, Suffix = " studs" })
+
+local PumpkinToggle = DodgeGroup:AddToggle("PumpkinDodge", {
+	Text = "Pumpkin Cannonball",
+	Default = true,
+})
+local PumpkinPopup = PumpkinToggle:AddSettingsPopup({ Width = 220, Tooltip = "Pumpkin dodge settings" })
+PumpkinPopup:AddSlider("PumpkinRadius", { Text = "Danger Radius", Default = 14, Min = 6, Max = 30, Rounding = 0, Suffix = " studs" })
+PumpkinPopup:AddSlider("PumpkinDistance", { Text = "Dodge Distance", Default = 28, Min = 10, Max = 60, Rounding = 0, Suffix = " studs" })
+
+local PirateToggle = DodgeGroup:AddToggle("PirateDodge", {
+	Text = "Pirate Projectile",
+	Default = true,
+})
+local PiratePopup = PirateToggle:AddSettingsPopup({ Width = 220, Tooltip = "Pirate dodge settings" })
+PiratePopup:AddSlider("PirateRadius", { Text = "Danger Radius", Default = 10, Min = 5, Max = 25, Rounding = 0, Suffix = " studs" })
+PiratePopup:AddSlider("PirateDistance", { Text = "Dodge Distance", Default = 28, Min = 10, Max = 60, Rounding = 0, Suffix = " studs" })
+
+-- [Tab: Automation]
+local UpgradeGroup = Tabs.Automation:AddGroupbox({
+	Side = "Left",
+	Name = "Progression & Loot",
+	IconName = "gift",
+})
+
+local AutoBuyToggle = UpgradeGroup:AddToggle("AutoBuy", {
+	Text = "Auto Buy Upgrades",
+	Tooltip = "Buys weapons until Star Shooter is owned, then buys health",
+	Default = true,
+})
+local BuyPopup = AutoBuyToggle:AddSettingsPopup({ Width = 220, Tooltip = "Auto Buy timing" })
+BuyPopup:AddSlider("BuyInterval", {
+	Text = "Purchase Interval",
+	Default = 2,
+	Min = 0.5,
+	Max = 10,
+	Rounding = 1,
+	Suffix = "s",
+})
+
+UpgradeGroup:AddToggle("AutoChest", {
+	Text = "Auto Raid Chest",
+	Tooltip = "Temporarily drops down to collect active RaidChests",
+	Default = true,
+})
+
+local MacroGroup = Tabs.Automation:AddGroupbox({
+	Side = "Right",
+	Name = "Wave Reset & Replay",
+	IconName = "repeat",
+})
+
+MacroGroup:AddToggle("WaveMacro", {
+	Text = "Enable Wave Reset + Replay",
+	Tooltip = "Resets character upon reaching Target Wave and clicks Play Again",
+	Default = true,
+})
+
+MacroGroup:AddInput("TargetWave", {
+	Text = "Target Wave",
+	Placeholder = "1 - 1000000",
+	Default = "30",
+	Numeric = true,
+	Finished = true,
+	ClearTextOnFocus = false,
+})
+
+MacroGroup:AddLabel("MacroStatusLabel", {
+	Text = "Status: Waiting for wave 30",
+	DoesWrap = true,
+})
+
+MacroGroup:AddButton({
+	Text = "Force Reset Character",
+	Risky = true,
+	DoubleClick = true,
+	Tooltip = "Double click to immediately reset your character",
+	Func = function()
+		local _, humanoid = getCharacterParts()
+		if humanoid and humanoid.Health > 0 then
+			AutoShoot.Release()
+			humanoid.Health = 0
+		end
+	end,
+})
+
+-- [Tab: Settings]
+local MenuGroup = Tabs.Settings:AddGroupbox({
+	Side = "Left",
+	Name = "Menu",
+	IconName = "wrench",
+})
+
+MenuGroup:AddToggle("KeybindMenuOpen", {
+	Text = "Show Keybind List",
+	Default = Library.KeybindFrame.Visible,
+	Callback = function(value)
+		Library.KeybindFrame.Visible = value
+	end,
+})
+
+MenuGroup:AddToggle("KeybindMenuVisibilityControl", {
+	Text = "Keybind List Follows Menu",
+	Default = false,
+	Callback = function(value)
+		Library.KeybindMenu:SetVisibilityControl(value)
+	end,
+})
+
+MenuGroup:AddToggle("AlwaysOnTop", {
+	Text = "Always On Top",
+	Default = Window.AlwaysOnTop,
+	Callback = function(value)
+		Window:SetAlwaysOnTop(value)
+	end,
+})
+
+MenuGroup:AddToggle("AutoMinimize", {
+	Text = "Auto Minimize on Start",
+	Default = false,
+})
+
+MenuGroup:AddDropdown("NotificationSide", {
+	Text = "Notification Side",
+	Values = { "Left", "Right" },
+	Default = "Right",
+	Callback = function(value)
+		Library:SetNotifySide(value)
+	end,
+})
+
+MenuGroup:AddDropdown("DPIDropdown", {
+	Text = "Interface Scale",
+	Values = { "50%", "75%", "100%", "125%", "150%", "175%", "200%" },
+	Default = "100%",
+	Callback = function(value)
+		Library:SetDPIScale(tonumber((value:gsub("%%", ""))))
+	end,
+})
+
+MenuGroup:AddSlider("UICornerSlider", {
+	Text = "Corner Radius",
+	Default = Library.CornerRadius,
+	Min = 0,
+	Max = 20,
+	Rounding = 0,
+	Callback = function(value)
+		Window:SetCornerRadius(value)
+	end,
+})
+
+MenuGroup:AddDivider()
+
+MenuGroup:AddLabel("Menu Keybind"):AddKeyPicker("MenuKeybind", {
+	Default = "RightShift",
+	NoUI = true,
+	Text = "Menu keybind",
+})
+
+MenuGroup:AddButton({
+	Text = "Unload Script",
+	Risky = true,
+	DoubleClick = true,
+	Tooltip = "Double click to stop all features and close the UI",
+	Func = function()
+		Library:Unload()
+	end,
+})
+
+Library.ToggleKeybind = Options.MenuKeybind
+
+--// 10. UI -> Logic Bindings \\--
+Toggles.SkyTP:OnChanged(function()
+	if not State.Running then
+		return
+	end
+	if Toggles.SkyTP.Value then
+		if not State.MainPlatform then
+			Platform.Build()
+		end
+	else
+		Platform.DestroyAll()
+	end
 end)
 
--- Raid chest collection
- task.spawn(function()
-    while running do
-        local prompt,part=chestPrompt()
-        local root=getRoot()
-        local hum=player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-        if chestOn and prompt and root and hum and hum.Health>0 then
-            chestBusy=true
-            releaseShoot()
-            local previous=root.CFrame
-            local hadSky=skyOn
-            removePlatform()
-            local ok,err=pcall(function()
-                for attempt=1,5 do
-                    if not running or not chestOn or not prompt.Parent or not prompt.Enabled or getRoot()~=root or hum.Health<=0 then break end
-                    root.CFrame=CFrame.new(part.Position+Vector3.new(0,3,0))
-                    task.wait(0.25)
-                    if not running or not chestOn or not prompt.Parent or not prompt.Enabled then break end
-                    VIM:SendKeyEvent(true,Enum.KeyCode.E,false,game)
-                    task.wait(0.1)
-                    VIM:SendKeyEvent(false,Enum.KeyCode.E,false,game)
-                    task.wait(0.8)
-                end
-            end)
-            if not ok then
-                pcall(function() VIM:SendKeyEvent(false,Enum.KeyCode.E,false,game) end)
-                warn("Auto Chest:",err)
-                if setclipboard then pcall(setclipboard,tostring(err)) end
-            end
-            if running and getRoot()==root and hum.Health>0 then
-                if hadSky and skyOn then root.CFrame=previous; root.CFrame=root.CFrame-Vector3.new(0,SKY_HEIGHT,0); makePlatform() end
-            end
-            chestBusy=false
-            task.wait(1)
-        end
-        task.wait(0.2)
-    end
+Options.SkyHeight:OnChanged(function()
+	Platform.UpdateHeight()
 end)
 
-local function replayClick(button)
-    releaseShoot()
-    if held then error("Auto Shoot mouse release failed") end
-    local p,s=button.AbsolutePosition,button.AbsoluteSize
-    local screen=button:FindFirstAncestorOfClass("ScreenGui")
-    local inset=GuiService:GetGuiInset()
-    local x=math.floor(p.X+s.X/2)
-    local y=math.floor(p.Y+s.Y/2+60)
-    VIM:SendMouseButtonEvent(x,y,0,true,game,0)
-    task.wait(0.15)
-    VIM:SendMouseButtonEvent(x,y,0,false,game,0)
+Toggles.AutoShoot:OnChanged(function()
+	if not Toggles.AutoShoot.Value then
+		AutoShoot.Release()
+	end
+end)
+
+local function bindDodgeToggle(toggleName, reasonPrefix)
+	Toggles[toggleName]:OnChanged(function()
+		if not Toggles[toggleName].Value and State.DodgeReason:find(reasonPrefix, 1, true) then
+			Platform.ReturnHome()
+		end
+	end)
 end
-task.spawn(function()
-    while running do
-        if chestBusy or (chestOn and chestPrompt()) then
-            macroStatus="Collecting raid chest..."
-        elseif macroOn then
-            local target=targetWave
-            local over=playerGui:FindFirstChild("GameOver")
-            local canvas=over and over:FindFirstChild("ResultsCanvas")
-            local stack=canvas and canvas:FindFirstChild("ContentStack")
-            local replay=stack and stack:FindFirstChild("PlayAgain")
-            if replay and visible(replay) then
-                sawResults=true
-                if os.clock()-lastReplay>=3 then
-                    lastReplay=os.clock()
-                    local ok,err=pcall(replayClick,replay)
-                    macroStatus=ok and "Replay click sent" or "Replay click failed"
-                    if not ok then
-                        warn(err)
-                        if setclipboard then pcall(setclipboard,tostring(err)) end
-                    end
-                end
-            else
-                if sawResults then resetSent=false; sawResults=false end
-                local main=playerGui:FindFirstChild("MainGui")
-                local label=main and main:FindFirstChild("WaveLabel")
-                local wave=label and tonumber(label.Text:match("Wave%s+(%d+)"))
-                if wave then
-                    macroStatus="Wave "..wave.." / "..target
-                    if wave>=target and not resetSent then
-                        local char=player.Character
-                        local hum=char and char:FindFirstChildOfClass("Humanoid")
-                        if hum and hum.Health>0 then
-                            resetSent=true
-                            releaseShoot()
-                            hum.Health=0
-                        end
-                    end
-                    if resetSent then macroStatus="Waiting for results" end
-                else
-                    macroStatus="Waiting for wave"
-                end
-            end
-        else
-            macroStatus="Disabled"
-        end
-        if running then macroLabel.Text=macroStatus end
-        task.wait(0.25)
-    end
+
+bindDodgeToggle("BossDodge", "BOSS")
+bindDodgeToggle("SoulDodge", "SOUL CANNON")
+bindDodgeToggle("RockDodge", "ROCK")
+bindDodgeToggle("PumpkinDodge", "PUMPKIN")
+bindDodgeToggle("PirateDodge", "PIRATE")
+
+Toggles.WaveMacro:OnChanged(function()
+	State.ResetSent = false
+	State.SawResults = false
 end)
 
-table.insert(connections,RunService.Heartbeat:Connect(function()
-    if not running or chestBusy or not skyOn or not platform then return end
-    local root=getRoot()
-    if not root then return end
-    cleanThreats()
-    if dodgeTarget then
-        if os.clock()>=dodgeUntil then
-            -- Do not return into a currently active impact area.
-            local homeSafe=true
-            for _,threat in ipairs(threats) do
-                if flat(home-threat.pos).Magnitude<=threat.radius then
-                    homeSafe=false
-                    dodgeUntil=math.max(dodgeUntil,threat.expires+0.1)
-                end
-            end
-            if homeSafe then returnHome() end
-        else
-            local desired=Vector3.new(dodgeTarget.X,standingY(),dodgeTarget.Z)
-            if (root.Position-desired).Magnitude>1 then root.CFrame=CFrame.new(desired) end
-            if dodgePlatform then
-                dodgePlatform.Position=Vector3.new(dodgeTarget.X,platformY(),dodgeTarget.Z)
-            end
-        end
-    else
-        platform.Position=Vector3.new(root.Position.X,platform.Position.Y,root.Position.Z)
-    end
+Options.TargetWave:OnChanged(function()
+	local parsed = tonumber(Options.TargetWave.Value)
+	if not parsed or parsed < 1 or parsed > 1000000 or parsed ~= math.floor(parsed) then
+		Options.TargetWave:SetValue(tostring(State.TargetWave))
+		Library:Notify({
+			Title = "Wave Macro",
+			Description = "Enter a whole number between 1 and 1,000,000.",
+			Time = 3,
+		})
+		return
+	end
+	State.TargetWave = parsed
+end)
+
+--// 11. Unload & Cleanup \\--
+local function shutdown()
+	if not State.Running then
+		return
+	end
+	State.Running = false
+	AutoShoot.Release()
+
+	for _, conn in ipairs(State.Connections) do
+		pcall(function()
+			conn:Disconnect()
+		end)
+	end
+	table.clear(State.Connections)
+
+	Platform.DestroyAll()
+	_G.ZombieAllInOneStop = nil
+	_G.ZombieBossDodgeStop = nil
+	print("[ZombieArena] Unloaded cleanly.")
+end
+
+Library:OnUnload(shutdown)
+
+local function externalStop()
+	if not Library.Unloaded then
+		Library:Unload()
+	else
+		shutdown()
+	end
+end
+
+_G.ZombieAllInOneStop = externalStop
+_G.ZombieBossDodgeStop = externalStop
+
+--// 12. Remote & Engine Connections \\--
+trackConnection(RockThrowRemote.OnClientEvent:Connect(function(...)
+	local args = table.pack(...)
+	for i = 1, args.n do
+		handleRockPacket(args[i])
+	end
 end))
-table.insert(connections,player.CharacterAdded:Connect(function()
-    task.wait(1)
-    if not running then return end
-    if skyOn then makePlatform() end
-    if equipOn then equipBest() end
+
+trackConnection(ZombieShootRemote.OnClientEvent:Connect(function(...)
+	local args = table.pack(...)
+	for i = 1, args.n do
+		handleShotPacket(args[i])
+	end
 end))
+
+trackConnection(BossAbilityRemote.OnClientEvent:Connect(handleBossAbility))
+
+trackConnection(RunService.Heartbeat:Connect(function()
+	if not State.Running or State.ChestBusy or not Toggles.SkyTP.Value or not State.MainPlatform then
+		return
+	end
+
+	local root = getRoot()
+	if not root then
+		return
+	end
+
+	Dodge.PruneThreats()
+
+	if State.DodgeTarget then
+		if os.clock() >= State.DodgeUntil then
+			local homeSafe = true
+			for _, threat in ipairs(State.Threats) do
+				if flattenVector(State.Home - threat.Pos).Magnitude <= threat.Radius then
+					homeSafe = false
+					State.DodgeUntil = math.max(State.DodgeUntil, threat.Expires + 0.1)
+				end
+			end
+			if homeSafe then
+				Platform.ReturnHome()
+			end
+		else
+			local standingY = Platform.GetStandingY()
+			if standingY then
+				local desired = Vector3.new(State.DodgeTarget.X, standingY, State.DodgeTarget.Z)
+				if (root.Position - desired).Magnitude > 1 then
+					root.AssemblyLinearVelocity = Vector3.zero
+					root.CFrame = CFrame.new(desired)
+				end
+			end
+			local platY = Platform.GetPlatformY()
+			if State.DodgePlatform and platY then
+				State.DodgePlatform.Position = Vector3.new(State.DodgeTarget.X, platY, State.DodgeTarget.Z)
+			end
+		end
+	else
+		State.MainPlatform.Position = Vector3.new(root.Position.X, State.MainPlatform.Position.Y, root.Position.Z)
+	end
+end))
+
+trackConnection(LocalPlayer.CharacterAdded:Connect(function()
+	task.wait(1)
+	if not State.Running then
+		return
+	end
+	if Toggles.SkyTP.Value then
+		Platform.Build()
+	end
+	if Toggles.AutoEquip.Value then
+		Weapons.EquipBest()
+	end
+end))
+
+--// 13. Background Loops \\--
+
+-- Auto Equip
 task.spawn(function()
-    while running do
-        if equipOn then equipBest() end
-        task.wait(0.5)
-    end
+	while State.Running and not Library.Unloaded do
+		if Toggles.AutoEquip.Value then
+			Weapons.EquipBest()
+		end
+		task.wait(0.5)
+	end
 end)
--- Original V4 kill aura preserved.
+
+-- Kill Aura
 task.spawn(function()
-    local cursor=1
-    while running do
-        task.wait(ATTACK_INTERVAL)
-        if not killOn then continue end
-        local zombies={}
-        for _,model in ipairs(zombieFolder:GetChildren()) do
-            local root=model:FindFirstChild("HumanoidRootPart")
-            if root then
-                local id=tonumber(model.Name:match("(%d+)$"))
-                if id then table.insert(zombies,{id=id,root=root}) end
-            end
-        end
-        if #zombies==0 then cursor=1;continue end
-        local weapon=currentWeapon()
-        local hits=math.min(MAX_HITS,#zombies)
-        for i=1,hits do
-            if not running or not killOn then break end
-            if cursor>#zombies then cursor=1 end
-            local zombie=zombies[cursor]
-            cursor+=1
-            if zombie.root.Parent then
-                pcall(function()
-                    gunHit:FireServer(weapon,zombie.id,zombie.root.Position)
-                end)
-            end
-        end
-    end
+	local cursor = 1
+	while State.Running and not Library.Unloaded do
+		task.wait(Options.AttackInterval.Value)
+		if not Toggles.KillAura.Value then
+			continue
+		end
+
+		local zombies = {}
+		for _, model in ipairs(ZombieFolder:GetChildren()) do
+			local root = model:FindFirstChild("HumanoidRootPart")
+			if root then
+				local id = tonumber(model.Name:match("(%d+)$"))
+				if id then
+					table.insert(zombies, { Id = id, Root = root })
+				end
+			end
+		end
+
+		if #zombies == 0 then
+			cursor = 1
+			continue
+		end
+
+		local weaponName = Weapons.GetEquippedName()
+		local hits = math.min(Options.MaxHits.Value, #zombies)
+
+		for _ = 1, hits do
+			if not State.Running or not Toggles.KillAura.Value then
+				break
+			end
+			if cursor > #zombies then
+				cursor = 1
+			end
+			local zombie = zombies[cursor]
+			cursor += 1
+			if zombie.Root.Parent then
+				pcall(function()
+					GunHitRemote:FireServer(weaponName, zombie.Id, zombie.Root.Position)
+				end)
+			end
+		end
+	end
 end)
--- Auto-buy: verify weapon ownership on every pass.
-local function ownsWeapon(name)
-    local function contains(container)
-        if not container then return false end
-        for _, item in ipairs(container:GetChildren()) do
-            if item:IsA("Tool") and normalize(item.Name)==normalize(name) then
-                return true
-            end
-        end
-        return false
-    end
-    return contains(player.Character) or contains(player:FindFirstChild("Backpack"))
+
+-- Auto Shoot
+task.spawn(function()
+	while State.Running and not Library.Unloaded do
+		local camera = workspace.CurrentCamera
+		if AutoShoot.CanFire() and camera and not State.MouseHeld then
+			local center = camera.ViewportSize / 2
+			State.ShotX, State.ShotY = center.X, center.Y
+
+			local ok, err = pcall(function()
+				VirtualInputManager:SendMouseButtonEvent(State.ShotX, State.ShotY, 0, true, game, 0)
+			end)
+
+			if ok then
+				State.MouseHeld = true
+				local deadline = os.clock() + Options.ShootHoldTime.Value
+				repeat
+					task.wait(0.05)
+				until not State.MouseHeld or not AutoShoot.CanFire() or os.clock() >= deadline
+				AutoShoot.Release()
+			else
+				warn("[ZombieArena] Auto Shoot failed:", err)
+				task.wait(2)
+			end
+		elseif State.MouseHeld then
+			AutoShoot.Release()
+		end
+		task.wait(0.1)
+	end
+	AutoShoot.Release()
+end)
+
+-- Auto Raid Chest
+task.spawn(function()
+	while State.Running and not Library.Unloaded do
+		local prompt, part = findActiveChestPrompt()
+		local _, humanoid, root = getCharacterParts()
+
+		if Toggles.AutoChest.Value and prompt and root and humanoid and humanoid.Health > 0 then
+			State.ChestBusy = true
+			AutoShoot.Release()
+
+			local savedHome = State.Home
+			local hadSky = Toggles.SkyTP.Value
+			Platform.DestroyAll()
+
+			local ok, err = pcall(function()
+				for _ = 1, 5 do
+					if not State.Running or not Toggles.AutoChest.Value or not prompt.Parent or not prompt.Enabled then
+						break
+					end
+					if getRoot() ~= root or humanoid.Health <= 0 then
+						break
+					end
+
+					root.AssemblyLinearVelocity = Vector3.zero
+					root.CFrame = CFrame.new(part.Position + Vector3.new(0, 3, 0))
+					task.wait(0.25)
+
+					if not State.Running or not Toggles.AutoChest.Value or not prompt.Parent or not prompt.Enabled then
+						break
+					end
+
+					if type(fireproximityprompt) == "function" then
+						pcall(fireproximityprompt, prompt)
+					end
+
+					if prompt.Parent and prompt.Enabled then
+						VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+						task.wait(0.1)
+						VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+					end
+
+					task.wait(0.8)
+				end
+			end)
+
+			if not ok then
+				pcall(function()
+					VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+				end)
+				warn("[ZombieArena] Auto Chest failed:", err)
+			end
+
+			if State.Running and getRoot() == root and humanoid.Health > 0 and hadSky and Toggles.SkyTP.Value then
+				Platform.Build(savedHome)
+			end
+
+			State.ChestBusy = false
+			task.wait(1)
+		end
+
+		task.wait(0.2)
+	end
+end)
+
+-- Auto Buy Upgrades
+task.spawn(function()
+	while State.Running and not Library.Unloaded do
+		task.wait(Options.BuyInterval.Value)
+		if not State.Running or not Toggles.AutoBuy.Value then
+			continue
+		end
+
+		local _, humanoid = getCharacterParts()
+		if not humanoid or humanoid.Health <= 0 then
+			State.HealthUnlocked = false
+			State.LastUpgrade = "Waiting for character"
+			continue
+		end
+
+		State.HealthUnlocked = Weapons.Owns("Star Shooter")
+		if State.HealthUnlocked then
+			State.LastUpgrade = "Health upgrades (Star Shooter owned)"
+			pcall(function()
+				PurchaseHealthRemote:FireServer()
+			end)
+		else
+			State.LastUpgrade = Weapons.Owns("SCAR-H") and "Waiting for Star Shooter"
+				or (Weapons.Owns("P90") and "Waiting for SCAR-H" or "Waiting for P90")
+			pcall(function()
+				PurchaseWeaponRemote:FireServer()
+			end)
+		end
+	end
+end)
+
+-- Wave Reset & Auto Replay
+local function clickReplayButton(button)
+	if not AutoShoot.Release() then
+		error("Auto Shoot mouse release failed")
+	end
+
+	local pos = button.AbsolutePosition
+	local size = button.AbsoluteSize
+	local screenGui = button:FindFirstAncestorOfClass("ScreenGui")
+	local insetTopLeft = GuiService:GetGuiInset()
+	local offsetY = (screenGui and screenGui.IgnoreGuiInset) and 0 or insetTopLeft.Y
+
+	local x = math.floor(pos.X + size.X / 2)
+	local y = math.floor(pos.Y + size.Y / 2 + offsetY)
+
+	VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
+	task.wait(0.15)
+	VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
 end
 
 task.spawn(function()
-    while running do
-        task.wait(BUY_INTERVAL)
-        if not running or not buyOn then continue end
-        local char=player.Character
-        local hum=char and char:FindFirstChildOfClass("Humanoid")
-        if not hum or hum.Health<=0 then
-            healthUnlocked=false
-            lastUpgrade="Waiting for character"
-            continue
-        end
-        healthUnlocked=ownsWeapon("Star Shooter")
-        if healthUnlocked then
-            lastUpgrade="Health upgrades (Star Shooter owned)"
-            pcall(function() healthBuy:FireServer() end)
-        else
-            lastUpgrade=ownsWeapon("SCAR-H") and "Waiting for Star Shooter"
-                or (ownsWeapon("P90") and "Waiting for SCAR-H" or "Waiting for P90")
-            pcall(function() weaponBuy:FireServer() end)
-        end
-    end
+	while State.Running and not Library.Unloaded do
+		if State.ChestBusy or (Toggles.AutoChest.Value and findActiveChestPrompt()) then
+			State.MacroStatus = "Collecting raid chest..."
+		elseif Toggles.WaveMacro.Value then
+			local replayButton = getPlayAgainButton()
+			if replayButton and isGuiVisible(replayButton) then
+				State.SawResults = true
+				if os.clock() - State.LastReplayTime >= 3 then
+					State.LastReplayTime = os.clock()
+					local ok, err = pcall(clickReplayButton, replayButton)
+					State.MacroStatus = ok and "Replay click sent" or "Replay click failed"
+					if not ok then
+						warn("[ZombieArena] Replay click error:", err)
+					end
+				end
+			else
+				if State.SawResults then
+					State.ResetSent = false
+					State.SawResults = false
+				end
+
+				local mainGui = PlayerGui:FindFirstChild("MainGui")
+				local waveLabel = mainGui and mainGui:FindFirstChild("WaveLabel")
+				local currentWave = waveLabel and tonumber(waveLabel.Text:match("Wave%s+(%d+)"))
+
+				if currentWave then
+					State.MacroStatus = string.format("Wave %d / %d", currentWave, State.TargetWave)
+					if currentWave >= State.TargetWave and not State.ResetSent then
+						local _, humanoid = getCharacterParts()
+						if humanoid and humanoid.Health > 0 then
+							State.ResetSent = true
+							AutoShoot.Release()
+							humanoid.Health = 0
+						end
+					end
+					if State.ResetSent then
+						State.MacroStatus = "Waiting for results..."
+					end
+				else
+					State.MacroStatus = "Waiting for wave..."
+				end
+			end
+		else
+			State.MacroStatus = "Disabled"
+		end
+
+		if State.Running and not Library.Unloaded then
+			Options.MacroStatusLabel:SetText("Status: " .. State.MacroStatus)
+		end
+		task.wait(0.25)
+	end
 end)
+
+-- Live Telemetry Label Updater
 task.spawn(function()
-    while running do
-        task.wait(0.5)
-        if status.Parent then
-            local remaining=math.max(0,dodgeUntil-os.clock())
-            status.Text="Zombies: "..#zombieFolder:GetChildren().." | Next: "..lastUpgrade
-                .."\nRock: "..rocksDodged.." | Boss: "..bossesDodged
-                .." | Pumpkin: "..pumpkinsDodged.."/"..pumpkinsDetected
-                .." | Pirate: "..piratesDodged.."/"..piratesDetected
-                .."\nDodge: "..dodgeReason.." | Hold: "..string.format("%.1f",remaining)
-                .."s\nAuto-Skip: OFF"
-        end
-    end
+	while State.Running and not Library.Unloaded do
+		local remaining = math.max(0, State.DodgeUntil - os.clock())
+		local s = State.Stats
+
+		Options.CombatStatusLabel:SetText(string.format(
+			"Zombies: %d  |  Weapon: %s\nUpgrade: %s\nDodge: %s (%.1fs)",
+			#ZombieFolder:GetChildren(),
+			Weapons.GetEquippedName(),
+			State.LastUpgrade,
+			State.DodgeReason,
+			remaining
+		))
+
+		Options.DodgeStatsLabel:SetText(string.format(
+			"Rock: %d  |  Boss: %d\nPumpkin: %d/%d  |  Pirate: %d/%d",
+			s.RocksDodged,
+			s.BossesDodged,
+			s.PumpkinsDodged,
+			s.PumpkinsDetected,
+			s.PiratesDodged,
+			s.PiratesDetected
+		))
+
+		task.wait(0.5)
+	end
 end)
-task.delay(1,function()
-    if not running then return end
-    if skyOn then makePlatform() end
-    if equipOn then equipBest() end
+
+--// 14. Themes, Configs & Initial Boot \\--
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
+
+ThemeManager:SetFolder("ZombieArenaAIO")
+SaveManager:SetFolder("ZombieArenaAIO/ZombieArena")
+
+SaveManager:BuildConfigSection(Tabs.Settings)
+ThemeManager:ApplyToTab(Tabs.Settings)
+SaveManager:LoadAutoloadConfig()
+
+if Toggles.AutoMinimize.Value then
+	Window:Minimize()
+end
+
+task.delay(1, function()
+	if not State.Running or Library.Unloaded then
+		return
+	end
+	if Toggles.SkyTP.Value and not State.MainPlatform then
+		Platform.Build()
+	end
+	if Toggles.AutoEquip.Value then
+		Weapons.EquipBest()
+	end
 end)
-print("ZOMBIE ARENA ALL-IN-ONE V17 | Pumpkin + Pirate Dodge: ON | Auto-Skip: OFF")
+
+Library:Notify({
+	Title = "Zombie Arena",
+	Description = "Loaded successfully. Press RightShift to toggle the menu.",
+	Time = 4,
+})
